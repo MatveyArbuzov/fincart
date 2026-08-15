@@ -3,18 +3,20 @@ package product
 import (
 	"context"
 	"database/sql"
+
+	"github.com/MatveyArbuzov/fincart/internal/database"
 )
 
 type TransactionRepository interface {
 	GetByIDForUpdate(
 		ctx context.Context,
-		tx *sql.Tx,
+		tx database.Tx,
 		id int64,
 	) (Product, error)
 
 	DecreaseStock(
 		ctx context.Context,
-		tx *sql.Tx,
+		tx database.Tx,
 		id int64,
 		quantity int,
 	) error
@@ -28,7 +30,7 @@ func NewPostgresTransactionRepository() *PostgresTransactionRepository {
 
 func (r *PostgresTransactionRepository) GetByIDForUpdate(
 	ctx context.Context,
-	tx *sql.Tx,
+	tx database.Tx,
 	id int64,
 ) (Product, error) {
 	const query = `
@@ -68,7 +70,7 @@ func (r *PostgresTransactionRepository) GetByIDForUpdate(
 
 func (r *PostgresTransactionRepository) DecreaseStock(
 	ctx context.Context,
-	tx *sql.Tx,
+	tx database.Tx,
 	id int64,
 	quantity int,
 ) error {
@@ -78,7 +80,12 @@ func (r *PostgresTransactionRepository) DecreaseStock(
 		WHERE id = $2
 	`
 
-	_, err := tx.ExecContext(ctx, query, quantity, id)
+	_, err := tx.ExecContext(
+		ctx,
+		query,
+		quantity,
+		id,
+	)
 
 	return err
 }

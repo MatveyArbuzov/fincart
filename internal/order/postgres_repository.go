@@ -2,22 +2,20 @@ package order
 
 import (
 	"context"
-	"database/sql"
+
+	"github.com/MatveyArbuzov/fincart/internal/database"
 )
 
 type PostgresRepository struct {
-	db *sql.DB
 }
 
-func NewPostgresRepository(db *sql.DB) *PostgresRepository {
-	return &PostgresRepository{
-		db: db,
-	}
+func NewPostgresRepository() *PostgresRepository {
+	return &PostgresRepository{}
 }
 
 func (r *PostgresRepository) Create(
 	ctx context.Context,
-	tx *sql.Tx,
+	tx database.Tx,
 	order Order,
 ) (Order, error) {
 	const query = `
@@ -52,7 +50,7 @@ func (r *PostgresRepository) Create(
 
 func (r *PostgresRepository) CreateItem(
 	ctx context.Context,
-	tx *sql.Tx,
+	tx database.Tx,
 	item OrderItem,
 ) (OrderItem, error) {
 	const query = `
