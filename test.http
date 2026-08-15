@@ -1,2 +1,2 @@
-GET http://localhost:8080/api/v1/products/999
+GET http://localhost:8080/api/v1/products
 

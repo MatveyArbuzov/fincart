@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: fincart-postgres
+    environment:
+      POSTGRES_DB: fincart
+      POSTGRES_USER: fincart
+      POSTGRES_PASSWORD: fincart
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
