@@ -2,6 +2,7 @@ package product
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 )
@@ -17,7 +18,11 @@ func NewHandler(service *Service) *Handler {
 }
 
 func (h *Handler) GetProducts(w http.ResponseWriter, r *http.Request) {
-	products := h.service.GetProducts()
+	products, err := h.service.GetProducts(r.Context())
+	if err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
 
 	response := struct {
 		Items []Product `json:"items"`
@@ -40,9 +45,15 @@ func (h *Handler) GetProductByID(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid product id", http.StatusBadRequest)
 		return
 	}
-	product, err := h.service.GetProductByID(id)
+
+	product, err := h.service.GetProductByID(r.Context(), id)
 	if err != nil {
-		http.Error(w, "the product was not found", http.StatusNotFound)
+		if errors.Is(err, ErrProductNotFound) {
+			http.Error(w, "product not found", http.StatusNotFound)
+			return
+		}
+
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 

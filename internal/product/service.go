@@ -1,45 +1,21 @@
 package product
 
-import "errors"
+import "context"
 
 type Service struct {
-	products []Product
+	repository Repository
 }
 
-func NewService() *Service {
+func NewService(repository Repository) *Service {
 	return &Service{
-		products: []Product{
-			{
-				ID:          1,
-				Name:        "MacBook Pro",
-				Description: "Apple laptop",
-				Price:       150000,
-				Currency:    "EUR",
-				Stock:       10,
-			},
-			{
-				ID:          2,
-				Name:        "Mechanical Keyboard",
-				Description: "Mechanical keyboard",
-				Price:       12000,
-				Currency:    "EUR",
-				Stock:       50,
-			},
-		},
+		repository: repository,
 	}
 }
 
-func (s *Service) GetProducts() []Product {
-	return s.products
+func (s *Service) GetProductByID(ctx context.Context, id int64) (Product, error) {
+	return s.repository.GetByID(ctx, id)
 }
 
-func (s *Service) GetProductByID(id int64) (Product, error) {
-	for _, product := range s.products {
-		if product.ID == id {
-			return product, nil
-		}
-	}
-
-	return Product{}, errors.New("the product was not found")
-
+func (s *Service) GetProducts(ctx context.Context) ([]Product, error) {
+	return s.repository.List(ctx)
 }

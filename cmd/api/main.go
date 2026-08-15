@@ -9,7 +9,8 @@ import (
 )
 
 func main() {
-	productService := product.NewService()
+	productRepository := product.NewMemoryRepository()
+	productService := product.NewService(productRepository)
 	productHandler := product.NewHandler(productService)
 
 	router := httpserver.NewRouter(productHandler)
