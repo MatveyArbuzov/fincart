@@ -6,19 +6,34 @@ CREATE TABLE users (
 
 CREATE TABLE orders (
     id BIGSERIAL PRIMARY KEY,
-    user_id BIGINT NOT NULL REFERENCES users(id),
-    status TEXT NOT NULL,
-    total_amount BIGINT NOT NULL CHECK (total_amount >= 0),
-    currency CHAR(3) NOT NULL,
+    user_id BIGINT NOT NULL,
+    status VARCHAR(50) NOT NULL,
+    total_amount BIGINT NOT NULL,
+    currency VARCHAR(3) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE order_items (
     id BIGSERIAL PRIMARY KEY,
-    order_id BIGINT NOT NULL REFERENCES orders(id),
-    product_id BIGINT NOT NULL REFERENCES products(id),
-    quantity INTEGER NOT NULL CHECK (quantity > 0),
-    unit_price BIGINT NOT NULL CHECK (unit_price >= 0)
+    order_id BIGINT NOT NULL,
+    product_id BIGINT NOT NULL,
+    quantity INT NOT NULL,
+    unit_price BIGINT NOT NULL,
+
+    CONSTRAINT fk_order_items_order
+        FOREIGN KEY (order_id)
+        REFERENCES orders(id)
+        ON DELETE CASCADE,
+
+    CONSTRAINT fk_order_items_product
+        FOREIGN KEY (product_id)
+        REFERENCES products(id),
+
+    CONSTRAINT order_items_quantity_positive
+        CHECK (quantity > 0),
+
+    CONSTRAINT order_items_unit_price_positive
+        CHECK (unit_price >= 0)
 );
 
 CREATE INDEX idx_orders_user_id

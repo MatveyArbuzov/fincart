@@ -8,25 +8,48 @@ import (
 
 	"github.com/MatveyArbuzov/fincart/internal/database"
 	"github.com/MatveyArbuzov/fincart/internal/httpserver"
+	"github.com/MatveyArbuzov/fincart/internal/order"
 	"github.com/MatveyArbuzov/fincart/internal/product"
 )
 
 func main() {
 	ctx := context.Background()
+
 	dsn := os.Getenv("DATABASE_URL")
+
 	db, err := database.NewPostgres(ctx, dsn)
 	if err != nil {
 		log.Fatalf("failed to connect to database: %v", err)
 	}
 	defer db.Close()
 
+	// Product
 	productRepository := product.NewPostgresRepository(db)
-
 	productService := product.NewService(productRepository)
-
 	productHandler := product.NewHandler(productService)
 
-	router := httpserver.NewRouter(productHandler)
+	// Order
+	transactionManager := database.NewManager(db)
+
+	productTransactionRepository :=
+		product.NewPostgresTransactionRepository()
+
+	orderRepository :=
+		order.NewPostgresRepository()
+
+	orderService := order.NewService(
+		transactionManager,
+		productTransactionRepository,
+		orderRepository,
+	)
+
+	orderHandler := order.NewHandler(orderService)
+
+	// HTTP
+	router := httpserver.NewRouter(
+		productHandler,
+		orderHandler,
+	)
 
 	server := &http.Server{
 		Addr:    ":8080",
