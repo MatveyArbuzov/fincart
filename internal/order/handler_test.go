@@ -28,6 +28,32 @@ type fakeProductRepository struct {
 	getByIDErr error
 }
 
+type fakeMultiProductRepository struct {
+	products map[int64]product.Product
+}
+
+func (f *fakeMultiProductRepository) GetByIDForUpdate(
+	ctx context.Context,
+	tx database.Tx,
+	id int64,
+) (product.Product, error) {
+	p, ok := f.products[id]
+	if !ok {
+		return product.Product{}, product.ErrProductNotFound
+	}
+
+	return p, nil
+}
+
+func (f *fakeMultiProductRepository) DecreaseStock(
+	ctx context.Context,
+	tx database.Tx,
+	id int64,
+	quantity int,
+) error {
+	return nil
+}
+
 func (f *fakeProductRepository) GetByIDForUpdate(
 	ctx context.Context,
 	tx database.Tx,
@@ -38,7 +64,7 @@ func (f *fakeProductRepository) GetByIDForUpdate(
 	}
 
 	if id != f.product.ID {
-		return product.Product{}, errors.New("product not found")
+		return product.Product{}, product.ErrProductNotFound
 	}
 
 	return f.product, nil
@@ -241,6 +267,22 @@ func TestCreateOrderHandler_InvalidJSON(t *testing.T) {
 			recorder.Code,
 		)
 	}
+
+	var response errorResponse
+
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf(
+			"failed to decode error response: %v",
+			err,
+		)
+	}
+
+	if response.Error != "invalid_request_body" {
+		t.Fatalf(
+			"expected error invalid_request_body, got %s",
+			response.Error,
+		)
+	}
 }
 
 func TestCreateOrderHandler_InvalidUserID(t *testing.T) {
@@ -348,6 +390,22 @@ func TestCreateOrderHandler_InsufficientStock(t *testing.T) {
 			recorder.Code,
 		)
 	}
+
+	var response errorResponse
+
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf(
+			"failed to decode error response: %v",
+			err,
+		)
+	}
+
+	if response.Error != "insufficient_stock" {
+		t.Fatalf(
+			"expected error insufficient_stock, got %s",
+			response.Error,
+		)
+	}
 }
 
 func TestCreateOrderHandler_InternalServerError(t *testing.T) {
@@ -393,6 +451,375 @@ func TestCreateOrderHandler_InternalServerError(t *testing.T) {
 			"expected status %d, got %d",
 			http.StatusInternalServerError,
 			recorder.Code,
+		)
+	}
+}
+
+func TestCreateOrderHandler_ZeroQuantity(t *testing.T) {
+	productRepository := &fakeProductRepository{
+		product: product.Product{
+			ID:       1,
+			Name:     "MacBook",
+			Price:    150000,
+			Currency: "EUR",
+			Stock:    10,
+		},
+	}
+
+	orderRepository := &fakeOrderRepository{}
+	transactionManager := &fakeTransactionManager{}
+
+	service := NewService(
+		transactionManager,
+		productRepository,
+		orderRepository,
+	)
+
+	handler := NewHandler(service)
+
+	body := `{
+		"items": [
+			{
+				"product_id": 1,
+				"quantity": 0
+			}
+		]
+	}`
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/orders",
+		strings.NewReader(body),
+	)
+
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-User-ID", "10")
+
+	recorder := httptest.NewRecorder()
+
+	handler.CreateOrder(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf(
+			"expected status %d, got %d",
+			http.StatusBadRequest,
+			recorder.Code,
+		)
+	}
+
+	var response errorResponse
+
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf(
+			"failed to decode error response: %v",
+			err,
+		)
+	}
+
+	if response.Error != "invalid_order" {
+		t.Fatalf(
+			"expected error invalid_order, got %s",
+			response.Error,
+		)
+	}
+}
+
+func TestCreateOrderHandler_NegativeQuantity(t *testing.T) {
+	productRepository := &fakeProductRepository{
+		product: product.Product{
+			ID:       1,
+			Name:     "MacBook",
+			Price:    150000,
+			Currency: "EUR",
+			Stock:    10,
+		},
+	}
+
+	orderRepository := &fakeOrderRepository{}
+	transactionManager := &fakeTransactionManager{}
+
+	service := NewService(
+		transactionManager,
+		productRepository,
+		orderRepository,
+	)
+
+	handler := NewHandler(service)
+
+	body := `{
+		"items": [
+			{
+				"product_id": 1,
+				"quantity": -1
+			}
+		]
+	}`
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/orders",
+		strings.NewReader(body),
+	)
+
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-User-ID", "10")
+
+	recorder := httptest.NewRecorder()
+
+	handler.CreateOrder(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf(
+			"expected status %d, got %d",
+			http.StatusBadRequest,
+			recorder.Code,
+		)
+	}
+
+	var response errorResponse
+
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf(
+			"failed to decode error response: %v",
+			err,
+		)
+	}
+
+	if response.Error != "invalid_order" {
+		t.Fatalf(
+			"expected error invalid_order, got %s",
+			response.Error,
+		)
+	}
+}
+
+func TestCreateOrderHandler_EmptyItems(t *testing.T) {
+	productRepository := &fakeProductRepository{}
+
+	orderRepository := &fakeOrderRepository{}
+	transactionManager := &fakeTransactionManager{}
+
+	service := NewService(
+		transactionManager,
+		productRepository,
+		orderRepository,
+	)
+
+	handler := NewHandler(service)
+
+	body := `{
+		"items": []
+	}`
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/orders",
+		strings.NewReader(body),
+	)
+
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-User-ID", "10")
+
+	recorder := httptest.NewRecorder()
+
+	handler.CreateOrder(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf(
+			"expected status %d, got %d",
+			http.StatusBadRequest,
+			recorder.Code,
+		)
+	}
+
+	var response errorResponse
+
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf(
+			"failed to decode error response: %v",
+			err,
+		)
+	}
+
+	if response.Error != "invalid_order" {
+		t.Fatalf(
+			"expected error invalid_order, got %s",
+			response.Error,
+		)
+	}
+}
+
+func TestCreateOrderHandler_ZeroProductID(t *testing.T) {
+	productRepository := &fakeProductRepository{}
+
+	orderRepository := &fakeOrderRepository{}
+	transactionManager := &fakeTransactionManager{}
+
+	service := NewService(
+		transactionManager,
+		productRepository,
+		orderRepository,
+	)
+
+	handler := NewHandler(service)
+
+	body := `{
+		"items": [
+			{
+				"product_id": 0,
+				"quantity": 1
+			}
+		]
+	}`
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/orders",
+		strings.NewReader(body),
+	)
+
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-User-ID", "10")
+
+	recorder := httptest.NewRecorder()
+
+	handler.CreateOrder(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf(
+			"expected status %d, got %d",
+			http.StatusBadRequest,
+			recorder.Code,
+		)
+	}
+
+	var response errorResponse
+
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf(
+			"failed to decode error response: %v",
+			err,
+		)
+	}
+
+	if response.Error != "invalid_order" {
+		t.Fatalf(
+			"expected error invalid_order, got %s",
+			response.Error,
+		)
+	}
+}
+
+func TestCreateOrderHandler_NegativeProductID(t *testing.T) {
+	productRepository := &fakeProductRepository{}
+
+	orderRepository := &fakeOrderRepository{}
+	transactionManager := &fakeTransactionManager{}
+
+	service := NewService(
+		transactionManager,
+		productRepository,
+		orderRepository,
+	)
+
+	handler := NewHandler(service)
+
+	body := `{
+		"items": [
+			{
+				"product_id": -1,
+				"quantity": 1
+			}
+		]
+	}`
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/orders",
+		strings.NewReader(body),
+	)
+
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-User-ID", "10")
+
+	recorder := httptest.NewRecorder()
+
+	handler.CreateOrder(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf(
+			"expected status %d, got %d",
+			http.StatusBadRequest,
+			recorder.Code,
+		)
+	}
+}
+
+func TestCreateOrderHandler_ProductNotFound(t *testing.T) {
+	productRepository := &fakeProductRepository{
+		product: product.Product{
+			ID:       1,
+			Name:     "MacBook",
+			Price:    150000,
+			Currency: "EUR",
+			Stock:    10,
+		},
+	}
+
+	orderRepository := &fakeOrderRepository{}
+	transactionManager := &fakeTransactionManager{}
+
+	service := NewService(
+		transactionManager,
+		productRepository,
+		orderRepository,
+	)
+
+	handler := NewHandler(service)
+
+	body := `{
+		"items": [
+			{
+				"product_id": 999999,
+				"quantity": 1
+			}
+		]
+	}`
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/orders",
+		strings.NewReader(body),
+	)
+
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-User-ID", "10")
+
+	recorder := httptest.NewRecorder()
+
+	handler.CreateOrder(recorder, request)
+
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf(
+			"expected status %d, got %d",
+			http.StatusNotFound,
+			recorder.Code,
+		)
+	}
+
+	var response errorResponse
+
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf(
+			"failed to decode error response: %v",
+			err,
+		)
+	}
+
+	if response.Error != "product_not_found" {
+		t.Fatalf(
+			"expected error product_not_found, got %s",
+			response.Error,
 		)
 	}
 }

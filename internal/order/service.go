@@ -10,8 +10,10 @@ import (
 )
 
 var (
-	ErrInvalidOrder      = errors.New("invalid order")
-	ErrInsufficientStock = errors.New("insufficient stock")
+	ErrInvalidOrder        = errors.New("invalid order")
+	ErrInsufficientStock   = errors.New("insufficient stock")
+	ErrProductNotFound     = errors.New("product not found")
+	ErrDifferentCurrencies = errors.New("products have different currencies")
 )
 
 type ProductRepository interface {
@@ -102,6 +104,10 @@ func (s *Service) CreateOrder(
 				productID,
 			)
 			if err != nil {
+				if errors.Is(err, product.ErrProductNotFound) {
+					return ErrProductNotFound
+				}
+
 				return err
 			}
 
@@ -116,7 +122,7 @@ func (s *Service) CreateOrder(
 			}
 
 			if currentProduct.Currency != currency {
-				return errors.New("products have different currencies")
+				return ErrDifferentCurrencies
 			}
 
 			totalAmount += currentProduct.Price * int64(quantity)

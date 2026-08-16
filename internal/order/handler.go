@@ -8,6 +8,25 @@ import (
 	"strconv"
 )
 
+type errorResponse struct {
+	Error string `json:"error"`
+}
+
+func writeError(
+	w http.ResponseWriter,
+	status int,
+	message string,
+) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+
+	_ = json.NewEncoder(w).Encode(
+		errorResponse{
+			Error: message,
+		},
+	)
+}
+
 type Handler struct {
 	service *Service
 }
@@ -19,12 +38,16 @@ func NewHandler(service *Service) *Handler {
 }
 
 func (h *Handler) CreateOrder(w http.ResponseWriter, r *http.Request) {
-	userID, err := strconv.ParseInt(r.Header.Get("X-User-ID"), 10, 64)
+	userID, err := strconv.ParseInt(
+		r.Header.Get("X-User-ID"),
+		10,
+		64,
+	)
 	if err != nil || userID <= 0 {
-		http.Error(
+		writeError(
 			w,
-			"invalid user id",
 			http.StatusBadRequest,
+			"invalid_user_id",
 		)
 		return
 	}
@@ -32,10 +55,10 @@ func (h *Handler) CreateOrder(w http.ResponseWriter, r *http.Request) {
 	var request CreateOrderRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		http.Error(
+		writeError(
 			w,
-			"invalid request body",
 			http.StatusBadRequest,
+			"invalid_request_body",
 		)
 		return
 	}
@@ -49,26 +72,40 @@ func (h *Handler) CreateOrder(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrInvalidOrder):
-			http.Error(
+			writeError(
 				w,
-				"invalid order",
 				http.StatusBadRequest,
+				"invalid_order",
 			)
 
 		case errors.Is(err, ErrInsufficientStock):
-			http.Error(
+			writeError(
 				w,
-				"insufficient stock",
 				http.StatusConflict,
+				"insufficient_stock",
+			)
+		case errors.Is(err, ErrProductNotFound):
+			writeError(
+				w,
+				http.StatusNotFound,
+				"product_not_found",
+			)
+		case errors.Is(err, ErrDifferentCurrencies):
+			writeError(
+				w,
+				http.StatusBadRequest,
+				"different_currencies",
+			)
+		default:
+			log.Printf(
+				"create order error: %v",
+				err,
 			)
 
-		default:
-			log.Printf("create order error: %v", err)
-
-			http.Error(
+			writeError(
 				w,
-				"internal server error",
 				http.StatusInternalServerError,
+				"internal_server_error",
 			)
 		}
 
@@ -83,6 +120,9 @@ func (h *Handler) CreateOrder(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusCreated)
 
 	if err := json.NewEncoder(w).Encode(order); err != nil {
-		return
+		log.Printf(
+			"failed to encode order response: %v",
+			err,
+		)
 	}
 }

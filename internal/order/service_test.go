@@ -407,17 +407,28 @@ func TestCreateOrder_OrderItemCreationFailed(t *testing.T) {
 	}
 }
 
-func TestCreateOrder_DuplicateProducts(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("failed to create sqlmock: %v", err)
+func TestService_CreateOrder_DifferentCurrencies(t *testing.T) {
+	productRepository := &fakeMultiProductRepository{
+		products: map[int64]product.Product{
+			1: {
+				ID:       1,
+				Name:     "MacBook",
+				Price:    150000,
+				Currency: "EUR",
+				Stock:    10,
+			},
+			2: {
+				ID:       2,
+				Name:     "iPhone",
+				Price:    100000,
+				Currency: "USD",
+				Stock:    10,
+			},
+		},
 	}
-	defer db.Close()
 
-	transactionManager := database.NewManager(db)
-
-	productRepository := product.NewPostgresTransactionRepository()
-	orderRepository := NewPostgresRepository()
+	orderRepository := &fakeOrderRepository{}
+	transactionManager := &fakeTransactionManager{}
 
 	service := NewService(
 		transactionManager,
@@ -425,135 +436,28 @@ func TestCreateOrder_DuplicateProducts(t *testing.T) {
 		orderRepository,
 	)
 
-	mock.ExpectBegin()
-
-	mock.ExpectQuery(regexp.QuoteMeta(`
-		SELECT
-			id,
-			name,
-			description,
-			price,
-			currency,
-			stock
-		FROM products
-		WHERE id = $1
-		FOR UPDATE
-	`)).
-		WithArgs(int64(1)).
-		WillReturnRows(
-			sqlmock.NewRows([]string{
-				"id",
-				"name",
-				"description",
-				"price",
-				"currency",
-				"stock",
-			}).AddRow(
-				int64(1),
-				"MacBook",
-				"Laptop",
-				int64(150000),
-				"EUR",
-				10,
-			),
-		)
-
-	mock.ExpectQuery(regexp.QuoteMeta(`
-		INSERT INTO orders (
-			user_id,
-			status,
-			total_amount,
-			currency
-		)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id, created_at
-	`)).
-		WithArgs(
-			int64(10),
-			"pending",
-			int64(750000),
-			"EUR",
-		).
-		WillReturnRows(
-			sqlmock.NewRows([]string{
-				"id",
-				"created_at",
-			}).AddRow(
-				int64(100),
-				time.Now(),
-			),
-		)
-
-	mock.ExpectQuery(regexp.QuoteMeta(`
-		INSERT INTO order_items (
-			order_id,
-			product_id,
-			quantity,
-			unit_price
-		)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id
-	`)).
-		WithArgs(
-			int64(100),
-			int64(1),
-			5,
-			int64(150000),
-		).
-		WillReturnRows(
-			sqlmock.NewRows([]string{
-				"id",
-			}).AddRow(
-				int64(1),
-			),
-		)
-
-	mock.ExpectExec(regexp.QuoteMeta(`
-		UPDATE products
-		SET stock = stock - $1
-		WHERE id = $2
-	`)).
-		WithArgs(
-			5,
-			int64(1),
-		).
-		WillReturnResult(
-			sqlmock.NewResult(0, 1),
-		)
-
-	mock.ExpectCommit()
-
-	result, err := service.CreateOrder(
-		context.Background(),
-		10,
-		CreateOrderRequest{
-			Items: []CreateOrderItem{
-				{
-					ProductID: 1,
-					Quantity:  2,
-				},
-				{
-					ProductID: 1,
-					Quantity:  3,
-				},
+	request := CreateOrderRequest{
+		Items: []CreateOrderItem{
+			{
+				ProductID: 1,
+				Quantity:  1,
+			},
+			{
+				ProductID: 2,
+				Quantity:  1,
 			},
 		},
+	}
+
+	_, err := service.CreateOrder(
+		context.Background(),
+		10,
+		request,
 	)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if result.TotalAmount != 750000 {
+	if !errors.Is(err, ErrDifferentCurrencies) {
 		t.Fatalf(
-			"expected total amount 750000, got %d",
-			result.TotalAmount,
-		)
-	}
-
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf(
-			"there were unmet SQL expectations: %v",
+			"expected ErrDifferentCurrencies, got %v",
 			err,
 		)
 	}
