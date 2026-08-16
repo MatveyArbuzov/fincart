@@ -14,6 +14,8 @@ var (
 	ErrInsufficientStock   = errors.New("insufficient stock")
 	ErrProductNotFound     = errors.New("product not found")
 	ErrDifferentCurrencies = errors.New("products have different currencies")
+	ErrOrderNotFound       = errors.New("order not found")
+	ErrInvalidOrderState   = errors.New("invalid order state")
 )
 
 type ProductRepository interface {
@@ -24,6 +26,13 @@ type ProductRepository interface {
 	) (product.Product, error)
 
 	DecreaseStock(
+		ctx context.Context,
+		tx database.Tx,
+		id int64,
+		quantity int,
+	) error
+
+	IncreaseStock(
 		ctx context.Context,
 		tx database.Tx,
 		id int64,
@@ -179,4 +188,108 @@ func (s *Service) CreateOrder(
 	}
 
 	return createdOrder, nil
+}
+
+func (s *Service) CancelOrder(
+	ctx context.Context,
+	orderID int64,
+) error {
+	if orderID <= 0 {
+		return ErrInvalidOrder
+	}
+
+	return s.transactions.WithinTransaction(
+		ctx,
+		func(tx database.Tx) error {
+			currentOrder, err := s.orders.GetByIDForUpdate(
+				ctx,
+				tx,
+				orderID,
+			)
+			if err != nil {
+				return err
+			}
+
+			if currentOrder.Status != "pending" {
+				return ErrInvalidOrderState
+			}
+
+			items, err := s.orders.GetItems(
+				ctx,
+				tx,
+				orderID,
+			)
+			if err != nil {
+				return err
+			}
+
+			for _, item := range items {
+				if err := s.products.IncreaseStock(
+					ctx,
+					tx,
+					item.ProductID,
+					item.Quantity,
+				); err != nil {
+					return err
+				}
+			}
+
+			if err := s.orders.UpdateStatus(
+				ctx,
+				tx,
+				orderID,
+				"cancelled",
+			); err != nil {
+				return err
+			}
+
+			return nil
+		},
+	)
+}
+
+func (s *Service) GetOrder(
+	ctx context.Context,
+	orderID int64,
+) (Order, []OrderItem, error) {
+	if orderID <= 0 {
+		return Order{}, nil, ErrInvalidOrder
+	}
+
+	var result Order
+	var items []OrderItem
+
+	err := s.transactions.WithinTransaction(
+		ctx,
+		func(tx database.Tx) error {
+			order, err := s.orders.GetByID(
+				ctx,
+				tx,
+				orderID,
+			)
+			if err != nil {
+				return err
+			}
+
+			orderItems, err := s.orders.GetItems(
+				ctx,
+				tx,
+				orderID,
+			)
+			if err != nil {
+				return err
+			}
+
+			result = order
+			items = orderItems
+
+			return nil
+		},
+	)
+
+	if err != nil {
+		return Order{}, nil, err
+	}
+
+	return result, items, nil
 }

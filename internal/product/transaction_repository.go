@@ -20,6 +20,13 @@ type TransactionRepository interface {
 		id int64,
 		quantity int,
 	) error
+
+	IncreaseStock(
+		ctx context.Context,
+		tx database.Tx,
+		id int64,
+		quantity int,
+	) error
 }
 
 type PostgresTransactionRepository struct{}
@@ -77,6 +84,28 @@ func (r *PostgresTransactionRepository) DecreaseStock(
 	const query = `
 		UPDATE products
 		SET stock = stock - $1
+		WHERE id = $2
+	`
+
+	_, err := tx.ExecContext(
+		ctx,
+		query,
+		quantity,
+		id,
+	)
+
+	return err
+}
+
+func (r *PostgresTransactionRepository) IncreaseStock(
+	ctx context.Context,
+	tx database.Tx,
+	id int64,
+	quantity int,
+) error {
+	const query = `
+		UPDATE products
+		SET stock = stock + $1
 		WHERE id = $2
 	`
 

@@ -54,6 +54,23 @@ func (f *fakeMultiProductRepository) DecreaseStock(
 	return nil
 }
 
+func (f *fakeMultiProductRepository) IncreaseStock(
+	ctx context.Context,
+	tx database.Tx,
+	id int64,
+	quantity int,
+) error {
+	p, ok := f.products[id]
+	if !ok {
+		return product.ErrProductNotFound
+	}
+
+	p.Stock += quantity
+	f.products[id] = p
+
+	return nil
+}
+
 func (f *fakeProductRepository) GetByIDForUpdate(
 	ctx context.Context,
 	tx database.Tx,
@@ -79,9 +96,31 @@ func (f *fakeProductRepository) DecreaseStock(
 	return nil
 }
 
+func (f *fakeProductRepository) IncreaseStock(
+	ctx context.Context,
+	tx database.Tx,
+	id int64,
+	quantity int,
+) error {
+	return nil
+}
+
 type fakeOrderRepository struct {
 	order     Order
 	orderItem OrderItem
+	items     []OrderItem
+}
+
+func (f *fakeOrderRepository) GetByID(
+	ctx context.Context,
+	tx database.Tx,
+	id int64,
+) (Order, error) {
+	if f.order.ID != id {
+		return Order{}, ErrOrderNotFound
+	}
+
+	return f.order, nil
 }
 
 func (f *fakeOrderRepository) Create(
@@ -95,6 +134,41 @@ func (f *fakeOrderRepository) Create(
 	f.order = order
 
 	return order, nil
+}
+
+func (f *fakeOrderRepository) GetByIDForUpdate(
+	ctx context.Context,
+	tx database.Tx,
+	id int64,
+) (Order, error) {
+	if f.order.ID != id {
+		return Order{}, ErrOrderNotFound
+	}
+
+	return f.order, nil
+}
+
+func (f *fakeOrderRepository) GetItems(
+	ctx context.Context,
+	tx database.Tx,
+	orderID int64,
+) ([]OrderItem, error) {
+	return f.items, nil
+}
+
+func (f *fakeOrderRepository) UpdateStatus(
+	ctx context.Context,
+	tx database.Tx,
+	orderID int64,
+	status string,
+) error {
+	if f.order.ID != orderID {
+		return ErrOrderNotFound
+	}
+
+	f.order.Status = status
+
+	return nil
 }
 
 func (f *fakeOrderRepository) CreateItem(
@@ -819,6 +893,204 @@ func TestCreateOrderHandler_ProductNotFound(t *testing.T) {
 	if response.Error != "product_not_found" {
 		t.Fatalf(
 			"expected error product_not_found, got %s",
+			response.Error,
+		)
+	}
+}
+
+func TestCancelOrderHandler_Success(t *testing.T) {
+	productRepository := &fakeProductRepository{}
+
+	orderRepository := &fakeOrderRepository{
+		order: Order{
+			ID:     100,
+			UserID: 10,
+			Status: "pending",
+		},
+	}
+
+	transactionManager := &fakeTransactionManager{}
+
+	service := NewService(
+		transactionManager,
+		productRepository,
+		orderRepository,
+	)
+
+	handler := NewHandler(service)
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/orders/100/cancel",
+		nil,
+	)
+
+	recorder := httptest.NewRecorder()
+
+	handler.CancelOrder(recorder, request)
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf(
+			"expected status %d, got %d",
+			http.StatusNoContent,
+			recorder.Code,
+		)
+	}
+}
+
+func TestCancelOrderHandler_InvalidOrderID(t *testing.T) {
+	productRepository := &fakeProductRepository{}
+	orderRepository := &fakeOrderRepository{}
+	transactionManager := &fakeTransactionManager{}
+
+	service := NewService(
+		transactionManager,
+		productRepository,
+		orderRepository,
+	)
+
+	handler := NewHandler(service)
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/orders/abc/cancel",
+		nil,
+	)
+
+	recorder := httptest.NewRecorder()
+
+	handler.CancelOrder(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf(
+			"expected status %d, got %d",
+			http.StatusBadRequest,
+			recorder.Code,
+		)
+	}
+
+	var response errorResponse
+
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf(
+			"failed to decode response: %v",
+			err,
+		)
+	}
+
+	if response.Error != "invalid_order_id" {
+		t.Fatalf(
+			"expected invalid_order_id, got %s",
+			response.Error,
+		)
+	}
+}
+
+func TestCancelOrderHandler_OrderNotFound(t *testing.T) {
+	productRepository := &fakeProductRepository{}
+
+	orderRepository := &fakeOrderRepository{
+		order: Order{
+			ID:     100,
+			Status: "pending",
+		},
+	}
+
+	transactionManager := &fakeTransactionManager{}
+
+	service := NewService(
+		transactionManager,
+		productRepository,
+		orderRepository,
+	)
+
+	handler := NewHandler(service)
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/orders/999/cancel",
+		nil,
+	)
+
+	recorder := httptest.NewRecorder()
+
+	handler.CancelOrder(recorder, request)
+
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf(
+			"expected status %d, got %d",
+			http.StatusNotFound,
+			recorder.Code,
+		)
+	}
+
+	var response errorResponse
+
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf(
+			"failed to decode response: %v",
+			err,
+		)
+	}
+
+	if response.Error != "order_not_found" {
+		t.Fatalf(
+			"expected order_not_found, got %s",
+			response.Error,
+		)
+	}
+}
+
+func TestCancelOrderHandler_InvalidOrderState(t *testing.T) {
+	productRepository := &fakeProductRepository{}
+
+	orderRepository := &fakeOrderRepository{
+		order: Order{
+			ID:     100,
+			Status: "cancelled",
+		},
+	}
+
+	transactionManager := &fakeTransactionManager{}
+
+	service := NewService(
+		transactionManager,
+		productRepository,
+		orderRepository,
+	)
+
+	handler := NewHandler(service)
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/orders/100/cancel",
+		nil,
+	)
+
+	recorder := httptest.NewRecorder()
+
+	handler.CancelOrder(recorder, request)
+
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf(
+			"expected status %d, got %d",
+			http.StatusConflict,
+			recorder.Code,
+		)
+	}
+
+	var response errorResponse
+
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf(
+			"failed to decode response: %v",
+			err,
+		)
+	}
+
+	if response.Error != "invalid_order_state" {
+		t.Fatalf(
+			"expected invalid_order_state, got %s",
 			response.Error,
 		)
 	}
