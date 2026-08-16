@@ -232,6 +232,10 @@ func (r *PostgresRepository) GetByID(
 	)
 
 	if err != nil {
+		if err == sql.ErrNoRows {
+			return Order{}, ErrOrderNotFound
+		}
+
 		return Order{}, err
 	}
 

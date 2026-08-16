@@ -271,3 +271,77 @@ func (h *Handler) GetOrder(
 		)
 	}
 }
+
+func (h *Handler) PayOrder(w http.ResponseWriter, r *http.Request) {
+	orderIDString := r.PathValue("id")
+
+	orderID, err := strconv.ParseInt(orderIDString, 10, 64)
+	if err != nil || orderID <= 0 {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"invalid_order_id",
+		)
+		return
+	}
+
+	err = h.service.PayOrder(
+		r.Context(),
+		orderID,
+	)
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidOrder):
+			writeError(
+				w,
+				http.StatusBadRequest,
+				"invalid_order_id",
+			)
+
+		case errors.Is(err, ErrOrderNotFound):
+			writeError(
+				w,
+				http.StatusNotFound,
+				"order_not_found",
+			)
+
+		case errors.Is(err, ErrInvalidOrderState):
+			writeError(
+				w,
+				http.StatusConflict,
+				"invalid_order_state",
+			)
+
+		case errors.Is(err, ErrPaymentFailed):
+			writeError(
+				w,
+				http.StatusPaymentRequired,
+				"payment_failed",
+			)
+
+		case errors.Is(err, ErrPaymentTimeout):
+			writeError(
+				w,
+				http.StatusGatewayTimeout,
+				"payment_timeout",
+			)
+
+		default:
+			log.Printf(
+				"pay order error: %v",
+				err,
+			)
+
+			writeError(
+				w,
+				http.StatusInternalServerError,
+				"internal_server_error",
+			)
+		}
+
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}

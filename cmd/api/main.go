@@ -9,6 +9,7 @@ import (
 	"github.com/MatveyArbuzov/fincart/internal/database"
 	"github.com/MatveyArbuzov/fincart/internal/httpserver"
 	"github.com/MatveyArbuzov/fincart/internal/order"
+	"github.com/MatveyArbuzov/fincart/internal/payment"
 	"github.com/MatveyArbuzov/fincart/internal/product"
 )
 
@@ -30,6 +31,7 @@ func main() {
 
 	// Order
 	transactionManager := database.NewManager(db)
+	paymentService := payment.NewFakeService(payment.ResultSuccess)
 
 	productTransactionRepository :=
 		product.NewPostgresTransactionRepository()
@@ -41,6 +43,7 @@ func main() {
 		transactionManager,
 		productTransactionRepository,
 		orderRepository,
+		paymentService,
 	)
 
 	orderHandler := order.NewHandler(orderService)

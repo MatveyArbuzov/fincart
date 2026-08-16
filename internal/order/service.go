@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	"github.com/MatveyArbuzov/fincart/internal/database"
+	"github.com/MatveyArbuzov/fincart/internal/payment"
 	"github.com/MatveyArbuzov/fincart/internal/product"
 )
 
@@ -16,6 +17,8 @@ var (
 	ErrDifferentCurrencies = errors.New("products have different currencies")
 	ErrOrderNotFound       = errors.New("order not found")
 	ErrInvalidOrderState   = errors.New("invalid order state")
+	ErrPaymentFailed       = errors.New("payment failed")
+	ErrPaymentTimeout      = errors.New("payment timeout")
 )
 
 type ProductRepository interface {
@@ -51,18 +54,88 @@ type Service struct {
 	transactions TransactionManager
 	products     ProductRepository
 	orders       Repository
+	payment      payment.Service
+}
+
+type PaymentService interface {
+	Pay(ctx context.Context, order Order) error
 }
 
 func NewService(
 	transactions TransactionManager,
 	products ProductRepository,
 	orders Repository,
+	paymentService payment.Service,
 ) *Service {
 	return &Service{
 		transactions: transactions,
 		products:     products,
 		orders:       orders,
+		payment:      paymentService,
 	}
+}
+
+func (s *Service) PayOrder(
+	ctx context.Context,
+	orderID int64,
+) error {
+	if orderID <= 0 {
+		return ErrInvalidOrder
+	}
+
+	return s.transactions.WithinTransaction(
+		ctx,
+		func(tx database.Tx) error {
+			currentOrder, err := s.orders.GetByIDForUpdate(
+				ctx,
+				tx,
+				orderID,
+			)
+			if err != nil {
+				return err
+			}
+
+			if OrderStatus(currentOrder.Status) != OrderStatusPending {
+				return ErrInvalidOrderState
+			}
+
+			result, err := s.payment.Pay(
+				ctx,
+				currentOrder.ID,
+				currentOrder.TotalAmount,
+				currentOrder.Currency,
+			)
+			if err != nil {
+				return err
+			}
+
+			switch result {
+			case payment.ResultSuccess:
+				if !CanTransition(
+					OrderStatus(currentOrder.Status),
+					OrderStatusPaid,
+				) {
+					return ErrInvalidOrderState
+				}
+
+				return s.orders.UpdateStatus(
+					ctx,
+					tx,
+					orderID,
+					string(OrderStatusPaid),
+				)
+
+			case payment.ResultFailed:
+				return ErrPaymentFailed
+
+			case payment.ResultTimeout:
+				return ErrPaymentTimeout
+
+			default:
+				return ErrPaymentFailed
+			}
+		},
+	)
 }
 
 func (s *Service) CreateOrder(

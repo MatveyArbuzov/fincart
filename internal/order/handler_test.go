@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/MatveyArbuzov/fincart/internal/database"
+	"github.com/MatveyArbuzov/fincart/internal/payment"
 	"github.com/MatveyArbuzov/fincart/internal/product"
 )
 
@@ -202,6 +203,7 @@ func TestCreateOrderHandler_Success(t *testing.T) {
 		transactionManager,
 		productRepository,
 		orderRepository,
+		payment.NewFakeService(payment.ResultSuccess),
 	)
 
 	handler := NewHandler(service)
@@ -308,6 +310,7 @@ func TestCreateOrderHandler_InvalidJSON(t *testing.T) {
 		transactionManager,
 		productRepository,
 		orderRepository,
+		payment.NewFakeService(payment.ResultSuccess),
 	)
 
 	handler := NewHandler(service)
@@ -377,6 +380,7 @@ func TestCreateOrderHandler_InvalidUserID(t *testing.T) {
 		transactionManager,
 		productRepository,
 		orderRepository,
+		payment.NewFakeService(payment.ResultSuccess),
 	)
 
 	handler := NewHandler(service)
@@ -431,6 +435,7 @@ func TestCreateOrderHandler_InsufficientStock(t *testing.T) {
 		transactionManager,
 		productRepository,
 		orderRepository,
+		payment.NewFakeService(payment.ResultSuccess),
 	)
 
 	handler := NewHandler(service)
@@ -494,6 +499,7 @@ func TestCreateOrderHandler_InternalServerError(t *testing.T) {
 		transactionManager,
 		productRepository,
 		orderRepository,
+		payment.NewFakeService(payment.ResultSuccess),
 	)
 
 	handler := NewHandler(service)
@@ -547,6 +553,7 @@ func TestCreateOrderHandler_ZeroQuantity(t *testing.T) {
 		transactionManager,
 		productRepository,
 		orderRepository,
+		payment.NewFakeService(payment.ResultSuccess),
 	)
 
 	handler := NewHandler(service)
@@ -616,6 +623,7 @@ func TestCreateOrderHandler_NegativeQuantity(t *testing.T) {
 		transactionManager,
 		productRepository,
 		orderRepository,
+		payment.NewFakeService(payment.ResultSuccess),
 	)
 
 	handler := NewHandler(service)
@@ -677,6 +685,7 @@ func TestCreateOrderHandler_EmptyItems(t *testing.T) {
 		transactionManager,
 		productRepository,
 		orderRepository,
+		payment.NewFakeService(payment.ResultSuccess),
 	)
 
 	handler := NewHandler(service)
@@ -733,6 +742,7 @@ func TestCreateOrderHandler_ZeroProductID(t *testing.T) {
 		transactionManager,
 		productRepository,
 		orderRepository,
+		payment.NewFakeService(payment.ResultSuccess),
 	)
 
 	handler := NewHandler(service)
@@ -794,6 +804,7 @@ func TestCreateOrderHandler_NegativeProductID(t *testing.T) {
 		transactionManager,
 		productRepository,
 		orderRepository,
+		payment.NewFakeService(payment.ResultSuccess),
 	)
 
 	handler := NewHandler(service)
@@ -847,6 +858,7 @@ func TestCreateOrderHandler_ProductNotFound(t *testing.T) {
 		transactionManager,
 		productRepository,
 		orderRepository,
+		payment.NewFakeService(payment.ResultSuccess),
 	)
 
 	handler := NewHandler(service)
@@ -915,6 +927,7 @@ func TestCancelOrderHandler_Success(t *testing.T) {
 		transactionManager,
 		productRepository,
 		orderRepository,
+		payment.NewFakeService(payment.ResultSuccess),
 	)
 
 	handler := NewHandler(service)
@@ -947,6 +960,7 @@ func TestCancelOrderHandler_InvalidOrderID(t *testing.T) {
 		transactionManager,
 		productRepository,
 		orderRepository,
+		payment.NewFakeService(payment.ResultSuccess),
 	)
 
 	handler := NewHandler(service)
@@ -1002,6 +1016,7 @@ func TestCancelOrderHandler_OrderNotFound(t *testing.T) {
 		transactionManager,
 		productRepository,
 		orderRepository,
+		payment.NewFakeService(payment.ResultSuccess),
 	)
 
 	handler := NewHandler(service)
@@ -1057,6 +1072,7 @@ func TestCancelOrderHandler_InvalidOrderState(t *testing.T) {
 		transactionManager,
 		productRepository,
 		orderRepository,
+		payment.NewFakeService(payment.ResultSuccess),
 	)
 
 	handler := NewHandler(service)
@@ -1092,6 +1108,239 @@ func TestCancelOrderHandler_InvalidOrderState(t *testing.T) {
 		t.Fatalf(
 			"expected invalid_order_state, got %s",
 			response.Error,
+		)
+	}
+}
+func TestPayOrderHandler_Success(t *testing.T) {
+	orderRepository := &cancelTestOrderRepository{
+		order: Order{
+			ID:          100,
+			Status:      "pending",
+			TotalAmount: 300000,
+			Currency:    "EUR",
+		},
+	}
+
+	paymentService := &mockPaymentService{
+		result: payment.ResultSuccess,
+	}
+
+	service := NewService(
+		&fakeTransactionManager{},
+		&cancelTestProductRepository{},
+		orderRepository,
+		paymentService,
+	)
+
+	handler := NewHandler(service)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/orders/100/pay",
+		nil,
+	)
+
+	req.SetPathValue("id", "100")
+
+	rec := httptest.NewRecorder()
+
+	handler.PayOrder(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf(
+			"expected status 204, got %d",
+			rec.Code,
+		)
+	}
+
+	if !paymentService.called {
+		t.Fatal("payment service was not called")
+	}
+
+	if orderRepository.updatedStatus != "paid" {
+		t.Fatalf(
+			"expected status paid, got %s",
+			orderRepository.updatedStatus,
+		)
+	}
+}
+
+func TestPayOrderHandler_InvalidOrderID(t *testing.T) {
+	service := NewService(
+		&fakeTransactionManager{},
+		&cancelTestProductRepository{},
+		&cancelTestOrderRepository{},
+		&mockPaymentService{
+			result: payment.ResultSuccess,
+		},
+	)
+
+	handler := NewHandler(service)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/orders/abc/pay",
+		nil,
+	)
+
+	req.SetPathValue("id", "abc")
+
+	rec := httptest.NewRecorder()
+
+	handler.PayOrder(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf(
+			"expected status 400, got %d",
+			rec.Code,
+		)
+	}
+
+	if !strings.Contains(rec.Body.String(), "invalid_order_id") {
+		t.Fatalf(
+			"expected invalid_order_id, got %s",
+			rec.Body.String(),
+		)
+	}
+}
+
+func TestPayOrderHandler_InvalidState(t *testing.T) {
+	orderRepository := &cancelTestOrderRepository{
+		order: Order{
+			ID:     100,
+			Status: "cancelled",
+		},
+	}
+
+	paymentService := &mockPaymentService{
+		result: payment.ResultSuccess,
+	}
+
+	service := NewService(
+		&fakeTransactionManager{},
+		&cancelTestProductRepository{},
+		orderRepository,
+		paymentService,
+	)
+
+	handler := NewHandler(service)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/orders/100/pay",
+		nil,
+	)
+
+	req.SetPathValue("id", "100")
+
+	rec := httptest.NewRecorder()
+
+	handler.PayOrder(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf(
+			"expected status 409, got %d",
+			rec.Code,
+		)
+	}
+
+	if paymentService.called {
+		t.Fatal("payment service must not be called")
+	}
+}
+
+func TestPayOrderHandler_PaymentFailed(t *testing.T) {
+	orderRepository := &cancelTestOrderRepository{
+		order: Order{
+			ID:     100,
+			Status: "pending",
+		},
+	}
+
+	paymentService := &mockPaymentService{
+		result: payment.ResultFailed,
+	}
+
+	service := NewService(
+		&fakeTransactionManager{},
+		&cancelTestProductRepository{},
+		orderRepository,
+		paymentService,
+	)
+
+	handler := NewHandler(service)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/orders/100/pay",
+		nil,
+	)
+
+	req.SetPathValue("id", "100")
+
+	rec := httptest.NewRecorder()
+
+	handler.PayOrder(rec, req)
+
+	if rec.Code != http.StatusPaymentRequired {
+		t.Fatalf(
+			"expected status 402, got %d",
+			rec.Code,
+		)
+	}
+
+	if !strings.Contains(rec.Body.String(), "payment_failed") {
+		t.Fatalf(
+			"expected payment_failed, got %s",
+			rec.Body.String(),
+		)
+	}
+}
+
+func TestPayOrderHandler_PaymentTimeout(t *testing.T) {
+	orderRepository := &cancelTestOrderRepository{
+		order: Order{
+			ID:     100,
+			Status: "pending",
+		},
+	}
+
+	paymentService := &mockPaymentService{
+		result: payment.ResultTimeout,
+	}
+
+	service := NewService(
+		&fakeTransactionManager{},
+		&cancelTestProductRepository{},
+		orderRepository,
+		paymentService,
+	)
+
+	handler := NewHandler(service)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/orders/100/pay",
+		nil,
+	)
+
+	req.SetPathValue("id", "100")
+
+	rec := httptest.NewRecorder()
+
+	handler.PayOrder(rec, req)
+
+	if rec.Code != http.StatusGatewayTimeout {
+		t.Fatalf(
+			"expected status 504, got %d",
+			rec.Code,
+		)
+	}
+
+	if !strings.Contains(rec.Body.String(), "payment_timeout") {
+		t.Fatalf(
+			"expected payment_timeout, got %s",
+			rec.Body.String(),
 		)
 	}
 }

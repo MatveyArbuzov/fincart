@@ -32,5 +32,7 @@ func NewRouter(
 
 	mux.HandleFunc("GET /api/v1/orders/{id}", orderHandler.GetOrder)
 
+	mux.HandleFunc("POST /api/v1/orders/{id}/pay", orderHandler.PayOrder)
+
 	return mux
 }
