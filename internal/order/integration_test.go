@@ -2,6 +2,7 @@ package order
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"testing"
 
@@ -40,6 +41,25 @@ func TestCancelOrder_Integration(t *testing.T) {
 		orderRepository,
 		payment.NewFakeService(payment.ResultSuccess),
 	)
+
+	var userID int64
+
+	err = db.QueryRowContext(
+		ctx,
+		`
+		INSERT INTO users (email, role)
+		VALUES ($1, $2)
+		ON CONFLICT (email)
+    	DO UPDATE SET email = EXCLUDED.email
+		RETURNING id
+		`,
+		"cancel-order-test@example.com",
+		"user",
+	).Scan(&userID)
+
+	if err != nil {
+		t.Fatalf("failed to create test user: %v", err)
+	}
 
 	// Создаём тестовый товар.
 	var productID int64
@@ -81,10 +101,19 @@ func TestCancelOrder_Integration(t *testing.T) {
 		_, err = db.ExecContext(
 			ctx,
 			"DELETE FROM orders WHERE user_id = $1",
-			int64(999999),
+			userID,
 		)
 		if err != nil {
 			t.Errorf("failed to cleanup orders: %v", err)
+		}
+
+		_, err = db.ExecContext(
+			ctx,
+			"DELETE FROM users WHERE id = $1",
+			userID,
+		)
+		if err != nil {
+			t.Errorf("failed to cleanup user: %v", err)
 		}
 
 		_, err = db.ExecContext(
@@ -100,7 +129,7 @@ func TestCancelOrder_Integration(t *testing.T) {
 	// Создаём заказ.
 	createdOrder, err := service.CreateOrder(
 		ctx,
-		999999,
+		userID,
 		CreateOrderRequest{
 			Items: []CreateOrderItem{
 				{
@@ -149,6 +178,7 @@ func TestCancelOrder_Integration(t *testing.T) {
 	// Отменяем заказ.
 	err = service.CancelOrder(
 		ctx,
+		userID,
 		createdOrder.ID,
 	)
 
@@ -201,4 +231,246 @@ func TestCancelOrder_Integration(t *testing.T) {
 			stock,
 		)
 	}
+}
+
+func TestPayOrder_Integration(t *testing.T) {
+	ctx := context.Background()
+
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		t.Skip("DATABASE_URL is not set")
+	}
+
+	db, err := database.NewPostgres(ctx, dsn)
+	if err != nil {
+		t.Fatalf(
+			"failed to connect to database: %v",
+			err,
+		)
+	}
+	defer db.Close()
+
+	var userID int64
+
+	err = db.QueryRowContext(
+		ctx,
+		`
+	INSERT INTO users (email, role)
+	VALUES ($1, $2)
+	RETURNING id
+	`,
+		"payment-test@example.com",
+		"user",
+	).Scan(&userID)
+
+	if err != nil {
+		t.Fatalf(
+			"failed to create test user: %v",
+			err,
+		)
+	}
+
+	productRepository := product.NewPostgresRepository(db)
+	_ = productRepository
+
+	transactionManager := database.NewManager(db)
+
+	productTransactionRepository :=
+		product.NewPostgresTransactionRepository()
+
+	orderRepository :=
+		NewPostgresRepository()
+
+	paymentService :=
+		payment.NewFakeService(payment.ResultSuccess)
+
+	service := NewService(
+		transactionManager,
+		productTransactionRepository,
+		orderRepository,
+		paymentService,
+	)
+
+	var productID int64
+	var orderID int64
+
+	err = db.QueryRowContext(
+		ctx,
+		`
+		INSERT INTO products (
+			name,
+			description,
+			price,
+			currency,
+			stock
+		)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id
+		`,
+		"Integration Product",
+		"Payment test product",
+		int64(10000),
+		"EUR",
+		10,
+	).Scan(&productID)
+
+	if err != nil {
+		t.Fatalf(
+			"failed to create product: %v",
+			err,
+		)
+	}
+
+	defer func() {
+		_, _ = db.ExecContext(
+			ctx,
+			`DELETE FROM order_items WHERE order_id = $1`,
+			orderID,
+		)
+
+		if orderID != 0 {
+			_, _ = db.ExecContext(
+				ctx,
+				`DELETE FROM orders WHERE id = $1`,
+				orderID,
+			)
+		}
+
+		_, _ = db.ExecContext(
+			ctx,
+			`DELETE FROM products WHERE id = $1`,
+			productID,
+		)
+		_, _ = db.ExecContext(
+			ctx,
+			`DELETE FROM users WHERE id = $1`,
+			userID,
+		)
+	}()
+
+	createdOrder, err := service.CreateOrder(
+		ctx,
+		userID,
+		CreateOrderRequest{
+			Items: []CreateOrderItem{
+				{
+					ProductID: productID,
+					Quantity:  2,
+				},
+			},
+		},
+	)
+
+	if err != nil {
+		t.Fatalf(
+			"failed to create order: %v",
+			err,
+		)
+	}
+
+	orderID = createdOrder.ID
+
+	if createdOrder.Status != "pending" {
+		t.Fatalf(
+			"expected pending status, got %s",
+			createdOrder.Status,
+		)
+	}
+
+	var status string
+
+	err = db.QueryRowContext(
+		ctx,
+		`SELECT status FROM orders WHERE id = $1`,
+		orderID,
+	).Scan(&status)
+
+	if err != nil {
+		t.Fatalf(
+			"failed to read order status: %v",
+			err,
+		)
+	}
+
+	if status != "pending" {
+		t.Fatalf(
+			"expected database status pending, got %s",
+			status,
+		)
+	}
+
+	err = service.PayOrder(
+		ctx,
+		userID,
+		orderID,
+	)
+
+	if err != nil {
+		t.Fatalf(
+			"failed to pay order: %v",
+			err,
+		)
+	}
+
+	err = db.QueryRowContext(
+		ctx,
+		`SELECT status FROM orders WHERE id = $1`,
+		orderID,
+	).Scan(&status)
+
+	if err != nil {
+		t.Fatalf(
+			"failed to read paid order status: %v",
+			err,
+		)
+	}
+
+	if status != "paid" {
+		t.Fatalf(
+			"expected database status paid, got %s",
+			status,
+		)
+	}
+
+	// Повторная оплата должна быть запрещена.
+	err = service.PayOrder(
+		ctx,
+		userID,
+		orderID,
+	)
+
+	if err == nil {
+		t.Fatal("expected second payment to fail")
+	}
+
+	if err != ErrInvalidOrderState {
+		t.Fatalf(
+			"expected ErrInvalidOrderState, got %v",
+			err,
+		)
+	}
+
+	var finalStatus string
+
+	err = db.QueryRowContext(
+		ctx,
+		`SELECT status FROM orders WHERE id = $1`,
+		orderID,
+	).Scan(&finalStatus)
+
+	if err != nil {
+		t.Fatalf(
+			"failed to read final order status: %v",
+			err,
+		)
+	}
+
+	if finalStatus != "paid" {
+		t.Fatalf(
+			"expected final status paid, got %s",
+			finalStatus,
+		)
+	}
+
+	_ = sql.ErrNoRows
 }

@@ -19,6 +19,7 @@ var (
 	ErrInvalidOrderState   = errors.New("invalid order state")
 	ErrPaymentFailed       = errors.New("payment failed")
 	ErrPaymentTimeout      = errors.New("payment timeout")
+	ErrOrderForbidden      = errors.New("order forbidden")
 )
 
 type ProductRepository interface {
@@ -73,69 +74,6 @@ func NewService(
 		orders:       orders,
 		payment:      paymentService,
 	}
-}
-
-func (s *Service) PayOrder(
-	ctx context.Context,
-	orderID int64,
-) error {
-	if orderID <= 0 {
-		return ErrInvalidOrder
-	}
-
-	return s.transactions.WithinTransaction(
-		ctx,
-		func(tx database.Tx) error {
-			currentOrder, err := s.orders.GetByIDForUpdate(
-				ctx,
-				tx,
-				orderID,
-			)
-			if err != nil {
-				return err
-			}
-
-			if OrderStatus(currentOrder.Status) != OrderStatusPending {
-				return ErrInvalidOrderState
-			}
-
-			result, err := s.payment.Pay(
-				ctx,
-				currentOrder.ID,
-				currentOrder.TotalAmount,
-				currentOrder.Currency,
-			)
-			if err != nil {
-				return err
-			}
-
-			switch result {
-			case payment.ResultSuccess:
-				if !CanTransition(
-					OrderStatus(currentOrder.Status),
-					OrderStatusPaid,
-				) {
-					return ErrInvalidOrderState
-				}
-
-				return s.orders.UpdateStatus(
-					ctx,
-					tx,
-					orderID,
-					string(OrderStatusPaid),
-				)
-
-			case payment.ResultFailed:
-				return ErrPaymentFailed
-
-			case payment.ResultTimeout:
-				return ErrPaymentTimeout
-
-			default:
-				return ErrPaymentFailed
-			}
-		},
-	)
 }
 
 func (s *Service) CreateOrder(
@@ -214,7 +152,7 @@ func (s *Service) CreateOrder(
 
 		order := Order{
 			UserID:      userID,
-			Status:      "pending",
+			Status:      string(OrderStatusPending),
 			TotalAmount: totalAmount,
 			Currency:    currency,
 		}
@@ -265,9 +203,10 @@ func (s *Service) CreateOrder(
 
 func (s *Service) CancelOrder(
 	ctx context.Context,
+	userID int64,
 	orderID int64,
 ) error {
-	if orderID <= 0 {
+	if userID <= 0 || orderID <= 0 {
 		return ErrInvalidOrder
 	}
 
@@ -283,7 +222,11 @@ func (s *Service) CancelOrder(
 				return err
 			}
 
-			if currentOrder.Status != "pending" {
+			if currentOrder.UserID != userID {
+				return ErrOrderForbidden
+			}
+
+			if OrderStatus(currentOrder.Status) != OrderStatusPending {
 				return ErrInvalidOrderState
 			}
 
@@ -307,16 +250,12 @@ func (s *Service) CancelOrder(
 				}
 			}
 
-			if err := s.orders.UpdateStatus(
+			return s.orders.UpdateStatus(
 				ctx,
 				tx,
 				orderID,
-				"cancelled",
-			); err != nil {
-				return err
-			}
-
-			return nil
+				string(OrderStatusCancelled),
+			)
 		},
 	)
 }
@@ -365,4 +304,65 @@ func (s *Service) GetOrder(
 	}
 
 	return result, items, nil
+}
+
+func (s *Service) PayOrder(
+	ctx context.Context,
+	userID int64,
+	orderID int64,
+) error {
+	if userID <= 0 || orderID <= 0 {
+		return ErrInvalidOrder
+	}
+
+	return s.transactions.WithinTransaction(
+		ctx,
+		func(tx database.Tx) error {
+			currentOrder, err := s.orders.GetByIDForUpdate(
+				ctx,
+				tx,
+				orderID,
+			)
+			if err != nil {
+				return err
+			}
+
+			if currentOrder.UserID != userID {
+				return ErrOrderForbidden
+			}
+
+			if OrderStatus(currentOrder.Status) != OrderStatusPending {
+				return ErrInvalidOrderState
+			}
+
+			result, err := s.payment.Pay(
+				ctx,
+				currentOrder.ID,
+				currentOrder.TotalAmount,
+				currentOrder.Currency,
+			)
+			if err != nil {
+				return err
+			}
+
+			switch result {
+			case payment.ResultSuccess:
+				return s.orders.UpdateStatus(
+					ctx,
+					tx,
+					orderID,
+					string(OrderStatusPaid),
+				)
+
+			case payment.ResultFailed:
+				return ErrPaymentFailed
+
+			case payment.ResultTimeout:
+				return ErrPaymentTimeout
+
+			default:
+				return ErrPaymentFailed
+			}
+		},
+	)
 }

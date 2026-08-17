@@ -629,6 +629,7 @@ func TestCancelOrder_Success(t *testing.T) {
 
 	err := service.CancelOrder(
 		context.Background(),
+		10,
 		100,
 	)
 
@@ -675,6 +676,7 @@ func TestCancelOrder_InvalidOrderID(t *testing.T) {
 
 	err := service.CancelOrder(
 		context.Background(),
+		10,
 		0,
 	)
 
@@ -696,6 +698,7 @@ func TestCancelOrder_NegativeOrderID(t *testing.T) {
 
 	err := service.CancelOrder(
 		context.Background(),
+		10,
 		-1,
 	)
 
@@ -723,6 +726,7 @@ func TestCancelOrder_OrderNotFound(t *testing.T) {
 
 	err := service.CancelOrder(
 		context.Background(),
+		10,
 		100,
 	)
 
@@ -750,6 +754,7 @@ func TestCancelOrder_GetOrderError(t *testing.T) {
 
 	err := service.CancelOrder(
 		context.Background(),
+		10,
 		100,
 	)
 
@@ -781,6 +786,7 @@ func TestCancelOrder_InvalidOrderState(t *testing.T) {
 
 	err := service.CancelOrder(
 		context.Background(),
+		10,
 		100,
 	)
 
@@ -823,6 +829,7 @@ func TestCancelOrder_GetItemsError(t *testing.T) {
 
 	err := service.CancelOrder(
 		context.Background(),
+		10,
 		100,
 	)
 
@@ -871,6 +878,7 @@ func TestCancelOrder_IncreaseStockError(t *testing.T) {
 
 	err := service.CancelOrder(
 		context.Background(),
+		10,
 		100,
 	)
 
@@ -918,6 +926,7 @@ func TestCancelOrder_UpdateStatusError(t *testing.T) {
 
 	err := service.CancelOrder(
 		context.Background(),
+		10,
 		100,
 	)
 
@@ -984,6 +993,7 @@ func TestPayOrder_Success(t *testing.T) {
 
 	err := service.PayOrder(
 		context.Background(),
+		10,
 		100,
 	)
 
@@ -1036,6 +1046,7 @@ func TestPayOrder_PaymentFailed(t *testing.T) {
 	orderRepository := &cancelTestOrderRepository{
 		order: Order{
 			ID:          100,
+			UserID:      10,
 			Status:      "pending",
 			TotalAmount: 300000,
 			Currency:    "EUR",
@@ -1051,6 +1062,7 @@ func TestPayOrder_PaymentFailed(t *testing.T) {
 
 	err := service.PayOrder(
 		context.Background(),
+		10,
 		100,
 	)
 
@@ -1074,6 +1086,7 @@ func TestPayOrder_PaymentTimeout(t *testing.T) {
 	orderRepository := &cancelTestOrderRepository{
 		order: Order{
 			ID:          100,
+			UserID:      10,
 			Status:      "pending",
 			TotalAmount: 300000,
 			Currency:    "EUR",
@@ -1089,6 +1102,7 @@ func TestPayOrder_PaymentTimeout(t *testing.T) {
 
 	err := service.PayOrder(
 		context.Background(),
+		10,
 		100,
 	)
 
@@ -1112,6 +1126,7 @@ func TestPayOrder_InvalidState(t *testing.T) {
 	orderRepository := &cancelTestOrderRepository{
 		order: Order{
 			ID:     100,
+			UserID: 10,
 			Status: "cancelled",
 		},
 	}
@@ -1125,6 +1140,7 @@ func TestPayOrder_InvalidState(t *testing.T) {
 
 	err := service.PayOrder(
 		context.Background(),
+		10,
 		100,
 	)
 
@@ -1152,6 +1168,7 @@ func TestPayOrder_InvalidOrderID(t *testing.T) {
 
 	err := service.PayOrder(
 		context.Background(),
+		10,
 		0,
 	)
 
@@ -1173,6 +1190,7 @@ func TestPayOrder_PaymentError(t *testing.T) {
 	orderRepository := &cancelTestOrderRepository{
 		order: Order{
 			ID:          100,
+			UserID:      10,
 			Status:      "pending",
 			TotalAmount: 300000,
 			Currency:    "EUR",
@@ -1188,6 +1206,7 @@ func TestPayOrder_PaymentError(t *testing.T) {
 
 	err := service.PayOrder(
 		context.Background(),
+		10,
 		100,
 	)
 
@@ -1200,5 +1219,194 @@ func TestPayOrder_PaymentError(t *testing.T) {
 
 	if orderRepository.updatedOrderID != 0 {
 		t.Fatal("order status must not be updated")
+	}
+}
+
+type payTestPaymentService struct {
+	result payment.Result
+	err    error
+
+	orderID  int64
+	amount   int64
+	currency string
+}
+
+func (f *payTestPaymentService) Pay(
+	ctx context.Context,
+	orderID int64,
+	amount int64,
+	currency string,
+) (payment.Result, error) {
+	f.orderID = orderID
+	f.amount = amount
+	f.currency = currency
+
+	if f.err != nil {
+		return "", f.err
+	}
+
+	return f.result, nil
+}
+
+func TestPayOrder_NegativeOrderID(t *testing.T) {
+	service := NewService(
+		&fakeTransactionManager{},
+		&cancelTestProductRepository{},
+		&cancelTestOrderRepository{},
+		&payTestPaymentService{
+			result: payment.ResultSuccess,
+		},
+	)
+
+	err := service.PayOrder(
+		context.Background(),
+		10,
+		-1,
+	)
+
+	if !errors.Is(err, ErrInvalidOrder) {
+		t.Fatalf(
+			"expected ErrInvalidOrder, got %v",
+			err,
+		)
+	}
+}
+
+func TestPayOrder_OrderNotFound(t *testing.T) {
+	orderRepository := &cancelTestOrderRepository{
+		getOrderErr: ErrOrderNotFound,
+	}
+
+	service := NewService(
+		&fakeTransactionManager{},
+		&cancelTestProductRepository{},
+		orderRepository,
+		&payTestPaymentService{
+			result: payment.ResultSuccess,
+		},
+	)
+
+	err := service.PayOrder(
+		context.Background(),
+		10,
+		100,
+	)
+
+	if !errors.Is(err, ErrOrderNotFound) {
+		t.Fatalf(
+			"expected ErrOrderNotFound, got %v",
+			err,
+		)
+	}
+}
+
+func TestPayOrder_GetOrderError(t *testing.T) {
+	expectedErr := errors.New("database error")
+
+	orderRepository := &cancelTestOrderRepository{
+		getOrderErr: expectedErr,
+	}
+
+	service := NewService(
+		&fakeTransactionManager{},
+		&cancelTestProductRepository{},
+		orderRepository,
+		&payTestPaymentService{
+			result: payment.ResultSuccess,
+		},
+	)
+
+	err := service.PayOrder(
+		context.Background(),
+		10,
+		100,
+	)
+
+	if !errors.Is(err, expectedErr) {
+		t.Fatalf(
+			"expected database error, got %v",
+			err,
+		)
+	}
+}
+
+func TestPayOrder_InvalidOrderState(t *testing.T) {
+	orderRepository := &cancelTestOrderRepository{
+		order: Order{
+			ID:          100,
+			UserID:      10,
+			Status:      "paid",
+			TotalAmount: 300000,
+			Currency:    "EUR",
+		},
+	}
+
+	paymentService := &payTestPaymentService{
+		result: payment.ResultSuccess,
+	}
+
+	service := NewService(
+		&fakeTransactionManager{},
+		&cancelTestProductRepository{},
+		orderRepository,
+		paymentService,
+	)
+
+	err := service.PayOrder(
+		context.Background(),
+		10,
+		100,
+	)
+
+	if !errors.Is(err, ErrInvalidOrderState) {
+		t.Fatalf(
+			"expected ErrInvalidOrderState, got %v",
+			err,
+		)
+	}
+
+	if paymentService.orderID != 0 {
+		t.Fatal("payment must not be called for invalid order state")
+	}
+
+	if orderRepository.updatedOrderID != 0 {
+		t.Fatal("order status must not be updated")
+	}
+}
+
+func TestPayOrder_UpdateStatusError(t *testing.T) {
+	expectedErr := errors.New("failed to update order status")
+
+	orderRepository := &cancelTestOrderRepository{
+		order: Order{
+			ID:          100,
+			UserID:      10,
+			Status:      "pending",
+			TotalAmount: 300000,
+			Currency:    "EUR",
+		},
+		updateErr: expectedErr,
+	}
+
+	service := NewService(
+		&fakeTransactionManager{},
+		&cancelTestProductRepository{},
+		orderRepository,
+		&payTestPaymentService{
+			result: payment.ResultSuccess,
+		},
+	)
+
+	err := service.PayOrder(
+		context.Background(),
+		10,
+		100,
+	)
+
+	if !errors.Is(err, expectedErr) {
+		t.Fatalf(
+			"expected update status error, got %v",
+			err,
+		)
 	}
 }

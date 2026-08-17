@@ -163,6 +163,7 @@ func TestCancelOrder_Transaction(t *testing.T) {
 
 	err = service.CancelOrder(
 		context.Background(),
+		10,
 		100,
 	)
 	if err != nil {
@@ -253,6 +254,7 @@ func TestCancelOrder_RollbackOnIncreaseStockError(t *testing.T) {
 
 	err = service.CancelOrder(
 		context.Background(),
+		10,
 		100,
 	)
 

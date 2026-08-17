@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/MatveyArbuzov/fincart/internal/auth"
 )
 
 type errorResponse struct {
@@ -39,19 +41,17 @@ func NewHandler(service *Service) *Handler {
 }
 
 func (h *Handler) CreateOrder(w http.ResponseWriter, r *http.Request) {
-	userID, err := strconv.ParseInt(
-		r.Header.Get("X-User-ID"),
-		10,
-		64,
-	)
-	if err != nil || userID <= 0 {
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
 		writeError(
 			w,
-			http.StatusBadRequest,
-			"invalid_user_id",
+			http.StatusUnauthorized,
+			"unauthorized",
 		)
 		return
 	}
+
+	userID := claims.UserID
 
 	var request CreateOrderRequest
 
@@ -147,8 +147,21 @@ func (h *Handler) CancelOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		writeError(
+			w,
+			http.StatusUnauthorized,
+			"unauthorized",
+		)
+		return
+	}
+
+	userID := claims.UserID
+
 	err = h.service.CancelOrder(
 		r.Context(),
+		userID,
 		orderID,
 	)
 
@@ -173,6 +186,13 @@ func (h *Handler) CancelOrder(w http.ResponseWriter, r *http.Request) {
 				w,
 				http.StatusConflict,
 				"invalid_order_state",
+			)
+
+		case errors.Is(err, ErrOrderForbidden):
+			writeError(
+				w,
+				http.StatusForbidden,
+				"order_forbidden",
 			)
 
 		default:
@@ -285,8 +305,21 @@ func (h *Handler) PayOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		writeError(
+			w,
+			http.StatusUnauthorized,
+			"unauthorized",
+		)
+		return
+	}
+
+	userID := claims.UserID
+
 	err = h.service.PayOrder(
 		r.Context(),
+		userID,
 		orderID,
 	)
 

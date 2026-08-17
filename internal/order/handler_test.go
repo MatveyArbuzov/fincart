@@ -937,6 +937,7 @@ func TestCancelOrderHandler_Success(t *testing.T) {
 		"/api/v1/orders/100/cancel",
 		nil,
 	)
+	request.Header.Set("X-User-ID", "10")
 
 	recorder := httptest.NewRecorder()
 
@@ -1027,6 +1028,7 @@ func TestCancelOrderHandler_OrderNotFound(t *testing.T) {
 		nil,
 	)
 
+	request.Header.Set("X-User-ID", "10")
 	recorder := httptest.NewRecorder()
 
 	handler.CancelOrder(recorder, request)
@@ -1062,6 +1064,7 @@ func TestCancelOrderHandler_InvalidOrderState(t *testing.T) {
 	orderRepository := &fakeOrderRepository{
 		order: Order{
 			ID:     100,
+			UserID: 10,
 			Status: "cancelled",
 		},
 	}
@@ -1082,6 +1085,8 @@ func TestCancelOrderHandler_InvalidOrderState(t *testing.T) {
 		"/api/v1/orders/100/cancel",
 		nil,
 	)
+
+	request.Header.Set("X-User-ID", "10")
 
 	recorder := httptest.NewRecorder()
 
@@ -1115,6 +1120,7 @@ func TestPayOrderHandler_Success(t *testing.T) {
 	orderRepository := &cancelTestOrderRepository{
 		order: Order{
 			ID:          100,
+			UserID:      10,
 			Status:      "pending",
 			TotalAmount: 300000,
 			Currency:    "EUR",
@@ -1139,6 +1145,8 @@ func TestPayOrderHandler_Success(t *testing.T) {
 		"/api/v1/orders/100/pay",
 		nil,
 	)
+
+	req.Header.Set("X-User-ID", "10")
 
 	req.SetPathValue("id", "100")
 
@@ -1208,6 +1216,7 @@ func TestPayOrderHandler_InvalidState(t *testing.T) {
 	orderRepository := &cancelTestOrderRepository{
 		order: Order{
 			ID:     100,
+			UserID: 10,
 			Status: "cancelled",
 		},
 	}
@@ -1231,6 +1240,8 @@ func TestPayOrderHandler_InvalidState(t *testing.T) {
 		nil,
 	)
 
+	req.Header.Set("X-User-ID", "10")
+
 	req.SetPathValue("id", "100")
 
 	rec := httptest.NewRecorder()
@@ -1253,6 +1264,7 @@ func TestPayOrderHandler_PaymentFailed(t *testing.T) {
 	orderRepository := &cancelTestOrderRepository{
 		order: Order{
 			ID:     100,
+			UserID: 10,
 			Status: "pending",
 		},
 	}
@@ -1275,6 +1287,7 @@ func TestPayOrderHandler_PaymentFailed(t *testing.T) {
 		"/api/v1/orders/100/pay",
 		nil,
 	)
+	req.Header.Set("X-User-ID", "10")
 
 	req.SetPathValue("id", "100")
 
@@ -1301,6 +1314,7 @@ func TestPayOrderHandler_PaymentTimeout(t *testing.T) {
 	orderRepository := &cancelTestOrderRepository{
 		order: Order{
 			ID:     100,
+			UserID: 10,
 			Status: "pending",
 		},
 	}
@@ -1323,6 +1337,8 @@ func TestPayOrderHandler_PaymentTimeout(t *testing.T) {
 		"/api/v1/orders/100/pay",
 		nil,
 	)
+
+	req.Header.Set("X-User-ID", "10")
 
 	req.SetPathValue("id", "100")
 

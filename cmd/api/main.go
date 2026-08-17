@@ -5,12 +5,15 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
+	"github.com/MatveyArbuzov/fincart/internal/auth"
 	"github.com/MatveyArbuzov/fincart/internal/database"
 	"github.com/MatveyArbuzov/fincart/internal/httpserver"
 	"github.com/MatveyArbuzov/fincart/internal/order"
 	"github.com/MatveyArbuzov/fincart/internal/payment"
 	"github.com/MatveyArbuzov/fincart/internal/product"
+	"github.com/MatveyArbuzov/fincart/internal/user"
 )
 
 func main() {
@@ -24,13 +27,38 @@ func main() {
 	}
 	defer db.Close()
 
+	transactionManager := database.NewManager(db)
+
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		log.Fatal("JWT_SECRET is not set")
+	}
+
+	jwtManager := auth.NewJWTManager(
+		jwtSecret,
+		24*time.Hour,
+	)
+
+	// User
+	userRepository := user.NewPostgresRepository()
+
+	userService := user.NewService(
+		transactionManager,
+		userRepository,
+	)
+
+	userHandler := user.NewHandler(
+		userService,
+		jwtManager,
+	)
+
 	// Product
 	productRepository := product.NewPostgresRepository(db)
 	productService := product.NewService(productRepository)
 	productHandler := product.NewHandler(productService)
 
 	// Order
-	transactionManager := database.NewManager(db)
+
 	paymentService := payment.NewFakeService(payment.ResultSuccess)
 
 	productTransactionRepository :=
@@ -52,6 +80,8 @@ func main() {
 	router := httpserver.NewRouter(
 		productHandler,
 		orderHandler,
+		userHandler,
+		jwtManager,
 	)
 
 	server := &http.Server{
