@@ -2,9 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/MatveyArbuzov/fincart/internal/auth"
 	"github.com/MatveyArbuzov/fincart/internal/cart"
@@ -129,13 +133,65 @@ func main() {
 	)
 
 	server := &http.Server{
-		Addr:    ":8080",
-		Handler: router,
+		Addr:              ":8080",
+		Handler:           router,
+		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	log.Println("server started on :8080")
+	// Start server.
 
-	if err := server.ListenAndServe(); err != nil {
-		log.Fatal(err)
+	serverErr := make(chan error, 1)
+
+	go func() {
+		log.Println("server started on :8080")
+
+		if err := server.ListenAndServe(); err != nil {
+			serverErr <- err
+		}
+	}()
+
+	// Wait for shutdown signal.
+
+	shutdownSignal := make(chan os.Signal, 1)
+
+	signal.Notify(
+		shutdownSignal,
+		os.Interrupt,
+		syscall.SIGTERM,
+	)
+
+	select {
+	case err := <-serverErr:
+		if !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf(
+				"server failed: %v",
+				err,
+			)
+		}
+
+	case sig := <-shutdownSignal:
+		log.Printf(
+			"shutdown signal received: %v",
+			sig,
+		)
 	}
+
+	// Graceful shutdown.
+
+	shutdownCtx, cancel := context.WithTimeout(
+		context.Background(),
+		10*time.Second,
+	)
+	defer cancel()
+
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf(
+			"graceful shutdown failed: %v",
+			err,
+		)
+
+		return
+	}
+
+	log.Println("server stopped gracefully")
 }
