@@ -43,4 +43,9 @@ type Repository interface {
 		tx database.Tx,
 		id int64,
 	) (Order, error)
+
+	List(
+		ctx context.Context,
+		tx database.Tx,
+	) ([]Order, error)
 }

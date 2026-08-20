@@ -9,17 +9,20 @@ import (
 )
 
 type Handler struct {
-	service    *Service
-	jwtManager *auth.JWTManager
+	service        *Service
+	jwtManager     *auth.JWTManager
+	refreshService *auth.RefreshService
 }
 
 func NewHandler(
 	service *Service,
 	jwtManager *auth.JWTManager,
+	refreshService *auth.RefreshService,
 ) *Handler {
 	return &Handler{
-		service:    service,
-		jwtManager: jwtManager,
+		service:        service,
+		jwtManager:     jwtManager,
+		refreshService: refreshService,
 	}
 }
 
@@ -28,8 +31,14 @@ type errorResponse struct {
 }
 
 type LoginResponse struct {
-	User  User   `json:"user"`
-	Token string `json:"token"`
+	User         User   `json:"user"`
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+}
+
+type RefreshResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
 }
 
 func writeError(
@@ -37,7 +46,11 @@ func writeError(
 	status int,
 	message string,
 ) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(
+		"Content-Type",
+		"application/json",
+	)
+
 	w.WriteHeader(status)
 
 	_ = json.NewEncoder(w).Encode(
@@ -139,10 +152,12 @@ func (h *Handler) Login(
 		return
 	}
 
-	token, err := h.jwtManager.GenerateToken(
+	accessToken, refreshToken, err := h.refreshService.Create(
+		r.Context(),
 		user.ID,
 		string(user.Role),
 	)
+
 	if err != nil {
 		writeError(
 			w,
@@ -159,8 +174,126 @@ func (h *Handler) Login(
 
 	_ = json.NewEncoder(w).Encode(
 		LoginResponse{
-			User:  user,
-			Token: token,
+			User:         user,
+			AccessToken:  accessToken,
+			RefreshToken: refreshToken,
 		},
 	)
+}
+
+func (h *Handler) Refresh(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	var request RefreshRequest
+
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"invalid_request_body",
+		)
+		return
+	}
+
+	if request.RefreshToken == "" {
+		writeError(
+			w,
+			http.StatusUnauthorized,
+			"invalid_refresh_token",
+		)
+		return
+	}
+
+	accessToken, refreshToken, err := h.refreshService.Refresh(
+		r.Context(),
+		request.RefreshToken,
+	)
+
+	if err != nil {
+		switch {
+		case errors.Is(err, auth.ErrInvalidRefreshToken),
+			errors.Is(err, auth.ErrRefreshTokenExpired),
+			errors.Is(err, auth.ErrRefreshTokenRevoked):
+
+			writeError(
+				w,
+				http.StatusUnauthorized,
+				"invalid_refresh_token",
+			)
+
+		default:
+			writeError(
+				w,
+				http.StatusInternalServerError,
+				"internal_server_error",
+			)
+		}
+
+		return
+	}
+
+	w.Header().Set(
+		"Content-Type",
+		"application/json",
+	)
+
+	_ = json.NewEncoder(w).Encode(
+		RefreshResponse{
+			AccessToken:  accessToken,
+			RefreshToken: refreshToken,
+		},
+	)
+}
+
+func (h *Handler) Logout(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	var request LogoutRequest
+
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"invalid_request_body",
+		)
+		return
+	}
+
+	if request.RefreshToken == "" {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"invalid_refresh_token",
+		)
+		return
+	}
+
+	err := h.refreshService.Revoke(
+		r.Context(),
+		request.RefreshToken,
+	)
+
+	if err != nil {
+		switch {
+		case errors.Is(err, auth.ErrInvalidRefreshToken):
+			writeError(
+				w,
+				http.StatusUnauthorized,
+				"invalid_refresh_token",
+			)
+
+		default:
+			writeError(
+				w,
+				http.StatusInternalServerError,
+				"internal_server_error",
+			)
+		}
+
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }

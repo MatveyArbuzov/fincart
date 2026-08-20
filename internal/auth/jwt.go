@@ -1,16 +1,26 @@
 package auth
 
 import (
+	"context"
 	"errors"
-	"fmt"
+	"net/http"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 )
 
-var (
-	ErrInvalidToken = errors.New("invalid token")
-)
+var ErrInvalidToken = errors.New("invalid token")
+
+type JWTManager struct {
+	secret []byte
+}
+
+func NewJWTManager(secret string) *JWTManager {
+	return &JWTManager{
+		secret: []byte(secret),
+	}
+}
 
 type Claims struct {
 	UserID int64  `json:"user_id"`
@@ -19,20 +29,7 @@ type Claims struct {
 	jwt.RegisteredClaims
 }
 
-type JWTManager struct {
-	secret     []byte
-	expiration time.Duration
-}
-
-func NewJWTManager(
-	secret string,
-	expiration time.Duration,
-) *JWTManager {
-	return &JWTManager{
-		secret:     []byte(secret),
-		expiration: expiration,
-	}
-}
+type claimsContextKey struct{}
 
 func (m *JWTManager) GenerateToken(
 	userID int64,
@@ -44,10 +41,11 @@ func (m *JWTManager) GenerateToken(
 		UserID: userID,
 		Role:   role,
 		RegisteredClaims: jwt.RegisteredClaims{
-			IssuedAt: jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(
-				now.Add(m.expiration),
+				now.Add(15 * time.Minute),
 			),
+			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now),
 		},
 	}
 
@@ -61,16 +59,13 @@ func (m *JWTManager) GenerateToken(
 
 func (m *JWTManager) ParseToken(
 	tokenString string,
-) (Claims, error) {
+) (int64, string, error) {
 	token, err := jwt.ParseWithClaims(
 		tokenString,
 		&Claims{},
-		func(token *jwt.Token) (any, error) {
+		func(token *jwt.Token) (interface{}, error) {
 			if token.Method != jwt.SigningMethodHS256 {
-				return nil, fmt.Errorf(
-					"%w: unexpected signing method",
-					ErrInvalidToken,
-				)
+				return nil, ErrInvalidToken
 			}
 
 			return m.secret, nil
@@ -78,25 +73,62 @@ func (m *JWTManager) ParseToken(
 	)
 
 	if err != nil {
-		return Claims{}, fmt.Errorf(
-			"%w: %v",
-			ErrInvalidToken,
-			err,
-		)
+		return 0, "", ErrInvalidToken
+	}
+
+	if !token.Valid {
+		return 0, "", ErrInvalidToken
 	}
 
 	claims, ok := token.Claims.(*Claims)
-	if !ok || !token.Valid {
-		return Claims{}, ErrInvalidToken
+	if !ok {
+		return 0, "", ErrInvalidToken
 	}
 
-	if claims.UserID <= 0 {
-		return Claims{}, ErrInvalidToken
+	if claims.UserID <= 0 || claims.Role == "" {
+		return 0, "", ErrInvalidToken
 	}
 
-	if claims.Role == "" {
-		return Claims{}, ErrInvalidToken
-	}
+	return claims.UserID, claims.Role, nil
+}
 
-	return *claims, nil
+func (m *JWTManager) Middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+
+		if authHeader == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		parts := strings.Fields(authHeader)
+
+		if len(parts) != 2 ||
+			!strings.EqualFold(parts[0], "Bearer") {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		userID, role, err := m.ParseToken(parts[1])
+		if err != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		claims := Claims{
+			UserID: userID,
+			Role:   role,
+		}
+
+		ctx := context.WithValue(
+			r.Context(),
+			claimsContextKey{},
+			claims,
+		)
+
+		next.ServeHTTP(
+			w,
+			r.WithContext(ctx),
+		)
+	})
 }

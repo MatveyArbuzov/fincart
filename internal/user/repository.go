@@ -20,4 +20,10 @@ type Repository interface {
 		tx database.Tx,
 		email string,
 	) (User, string, error)
+
+	GetRoleByID(
+		ctx context.Context,
+		tx database.Tx,
+		id int64,
+	) (string, error)
 }

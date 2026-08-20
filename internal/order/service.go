@@ -262,9 +262,10 @@ func (s *Service) CancelOrder(
 
 func (s *Service) GetOrder(
 	ctx context.Context,
+	userID int64,
 	orderID int64,
 ) (Order, []OrderItem, error) {
-	if orderID <= 0 {
+	if userID <= 0 || orderID <= 0 {
 		return Order{}, nil, ErrInvalidOrder
 	}
 
@@ -281,6 +282,10 @@ func (s *Service) GetOrder(
 			)
 			if err != nil {
 				return err
+			}
+
+			if order.UserID != userID {
+				return ErrOrderForbidden
 			}
 
 			orderItems, err := s.orders.GetItems(
@@ -304,6 +309,74 @@ func (s *Service) GetOrder(
 	}
 
 	return result, items, nil
+}
+
+func (s *Service) ListOrders(
+	ctx context.Context,
+) ([]Order, error) {
+	var orders []Order
+
+	err := s.transactions.WithinTransaction(
+		ctx,
+		func(tx database.Tx) error {
+			var err error
+
+			orders, err = s.orders.List(
+				ctx,
+				tx,
+			)
+
+			return err
+		},
+	)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return orders, nil
+}
+
+func (s *Service) UpdateOrderStatus(
+	ctx context.Context,
+	orderID int64,
+	status string,
+) error {
+	if orderID <= 0 {
+		return ErrInvalidOrder
+	}
+
+	if !OrderStatus(status).IsValid() {
+		return ErrInvalidOrderState
+	}
+
+	return s.transactions.WithinTransaction(
+		ctx,
+		func(tx database.Tx) error {
+			currentOrder, err := s.orders.GetByIDForUpdate(
+				ctx,
+				tx,
+				orderID,
+			)
+			if err != nil {
+				return err
+			}
+
+			currentStatus := OrderStatus(currentOrder.Status)
+			newStatus := OrderStatus(status)
+
+			if !CanTransition(currentStatus, newStatus) {
+				return ErrInvalidOrderState
+			}
+
+			return s.orders.UpdateStatus(
+				ctx,
+				tx,
+				orderID,
+				string(newStatus),
+			)
+		},
+	)
 }
 
 func (s *Service) PayOrder(

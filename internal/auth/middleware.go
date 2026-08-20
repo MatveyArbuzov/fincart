@@ -1,62 +1,50 @@
 package auth
 
 import (
+	"context"
 	"net/http"
-	"strings"
 )
 
-func (m *JWTManager) Middleware(
-	next http.Handler,
-) http.Handler {
-	return http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			header := r.Header.Get("Authorization")
+func ClaimsFromContext(
+	ctx context.Context,
+) (Claims, bool) {
+	claims, ok := ctx.Value(
+		claimsContextKey{},
+	).(Claims)
 
-			if header == "" {
-				http.Error(
-					w,
-					"missing authorization header",
-					http.StatusUnauthorized,
+	return claims, ok
+}
+
+func RequireRole(
+	role string,
+) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				claims, ok := ClaimsFromContext(
+					r.Context(),
 				)
-				return
-			}
 
-			parts := strings.SplitN(
-				header,
-				" ",
-				2,
-			)
+				if !ok {
+					http.Error(
+						w,
+						"unauthorized",
+						http.StatusUnauthorized,
+					)
+					return
+				}
 
-			if len(parts) != 2 ||
-				!strings.EqualFold(parts[0], "Bearer") ||
-				parts[1] == "" {
-				http.Error(
-					w,
-					"invalid authorization header",
-					http.StatusUnauthorized,
-				)
-				return
-			}
+				if claims.Role != role {
+					http.Error(
+						w,
+						"forbidden",
+						http.StatusForbidden,
+					)
+					return
+				}
 
-			claims, err := m.ParseToken(parts[1])
-			if err != nil {
-				http.Error(
-					w,
-					"invalid token",
-					http.StatusUnauthorized,
-				)
-				return
-			}
-
-			ctx := WithClaims(
-				r.Context(),
-				claims,
-			)
-
-			next.ServeHTTP(
-				w,
-				r.WithContext(ctx),
-			)
-		},
-	)
+				next.ServeHTTP(w, r)
+			},
+		)
+	}
 }

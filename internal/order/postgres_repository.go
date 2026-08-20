@@ -241,3 +241,54 @@ func (r *PostgresRepository) GetByID(
 
 	return order, nil
 }
+
+func (r *PostgresRepository) List(
+	ctx context.Context,
+	tx database.Tx,
+) ([]Order, error) {
+	const query = `
+		SELECT
+			id,
+			user_id,
+			status,
+			total_amount,
+			currency,
+			created_at
+		FROM orders
+		ORDER BY id DESC
+	`
+
+	rows, err := tx.QueryContext(
+		ctx,
+		query,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	orders := make([]Order, 0)
+
+	for rows.Next() {
+		var order Order
+
+		if err := rows.Scan(
+			&order.ID,
+			&order.UserID,
+			&order.Status,
+			&order.TotalAmount,
+			&order.Currency,
+			&order.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+
+		orders = append(orders, order)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return orders, nil
+}

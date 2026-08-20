@@ -8,3 +8,7 @@ type CreateOrderItem struct {
 	ProductID int64 `json:"product_id"`
 	Quantity  int   `json:"quantity"`
 }
+
+type UpdateOrderStatusRequest struct {
+	Status string `json:"status"`
+}

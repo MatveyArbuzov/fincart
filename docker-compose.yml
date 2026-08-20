@@ -22,7 +22,7 @@ services:
       target: migrate
     container_name: fincart-migrate
     environment:
-      DATABASE_URL: postgres://fincart:fincart@postgres:5432/fincart?sslmode=disable
+      DATABASE_URL: postgresql://fincart:fincart@postgres:5432/fincart?sslmode=disable
     depends_on:
       postgres:
         condition: service_healthy
@@ -33,7 +33,7 @@ services:
       target: api
     container_name: fincart-api
     environment:
-      DATABASE_URL: postgres://fincart:fincart@postgres:5432/fincart?sslmode=disable
+      DATABASE_URL: postgresql://fincart:fincart@postgres:5432/fincart?sslmode=disable
       JWT_SECRET: dev-secret-change-me
     ports:
       - "8080:8080"

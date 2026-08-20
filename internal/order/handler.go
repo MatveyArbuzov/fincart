@@ -218,6 +218,18 @@ func (h *Handler) GetOrder(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		writeError(
+			w,
+			http.StatusUnauthorized,
+			"unauthorized",
+		)
+		return
+	}
+
+	userID := claims.UserID
+
 	id, err := strconv.ParseInt(
 		r.PathValue("id"),
 		10,
@@ -234,6 +246,7 @@ func (h *Handler) GetOrder(
 
 	order, items, err := h.service.GetOrder(
 		r.Context(),
+		userID,
 		id,
 	)
 
@@ -251,6 +264,12 @@ func (h *Handler) GetOrder(
 				w,
 				http.StatusNotFound,
 				"order_not_found",
+			)
+		case errors.Is(err, ErrOrderForbidden):
+			writeError(
+				w,
+				http.StatusForbidden,
+				"order_forbidden",
 			)
 
 		default:
@@ -338,7 +357,12 @@ func (h *Handler) PayOrder(w http.ResponseWriter, r *http.Request) {
 				http.StatusNotFound,
 				"order_not_found",
 			)
-
+		case errors.Is(err, ErrOrderForbidden):
+			writeError(
+				w,
+				http.StatusForbidden,
+				"order_forbidden",
+			)
 		case errors.Is(err, ErrInvalidOrderState):
 			writeError(
 				w,
@@ -363,6 +387,124 @@ func (h *Handler) PayOrder(w http.ResponseWriter, r *http.Request) {
 		default:
 			log.Printf(
 				"pay order error: %v",
+				err,
+			)
+
+			writeError(
+				w,
+				http.StatusInternalServerError,
+				"internal_server_error",
+			)
+		}
+
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) ListOrders(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	orders, err := h.service.ListOrders(
+		r.Context(),
+	)
+	if err != nil {
+		log.Printf(
+			"list orders error: %v",
+			err,
+		)
+
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"internal_server_error",
+		)
+
+		return
+	}
+
+	w.Header().Set(
+		"Content-Type",
+		"application/json",
+	)
+
+	w.WriteHeader(http.StatusOK)
+
+	response := struct {
+		Orders []Order `json:"orders"`
+	}{
+		Orders: orders,
+	}
+
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		log.Printf(
+			"failed to encode orders response: %v",
+			err,
+		)
+	}
+}
+
+func (h *Handler) UpdateOrderStatus(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	orderID, err := strconv.ParseInt(
+		r.PathValue("id"),
+		10,
+		64,
+	)
+	if err != nil || orderID <= 0 {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"invalid_order_id",
+		)
+		return
+	}
+
+	var request UpdateOrderStatusRequest
+
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"invalid_request_body",
+		)
+		return
+	}
+
+	if err := h.service.UpdateOrderStatus(
+		r.Context(),
+		orderID,
+		request.Status,
+	); err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidOrder):
+			writeError(
+				w,
+				http.StatusBadRequest,
+				"invalid_order_id",
+			)
+
+		case errors.Is(err, ErrOrderNotFound):
+			writeError(
+				w,
+				http.StatusNotFound,
+				"order_not_found",
+			)
+
+		case errors.Is(err, ErrInvalidOrderState):
+			writeError(
+				w,
+				http.StatusConflict,
+				"invalid_order_state",
+			)
+
+		default:
+			log.Printf(
+				"update order status error: %v",
 				err,
 			)
 

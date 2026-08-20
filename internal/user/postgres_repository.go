@@ -99,3 +99,33 @@ func (r *PostgresRepository) GetByEmail(
 
 	return user, passwordHash, nil
 }
+
+func (r *PostgresRepository) GetRoleByID(
+	ctx context.Context,
+	tx database.Tx,
+	id int64,
+) (string, error) {
+	const query = `
+		SELECT role
+		FROM users
+		WHERE id = $1
+	`
+
+	var role string
+
+	err := tx.QueryRowContext(
+		ctx,
+		query,
+		id,
+	).Scan(&role)
+
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", ErrUserNotFound
+		}
+
+		return "", err
+	}
+
+	return role, nil
+}

@@ -4,23 +4,25 @@ import "context"
 
 type contextKey string
 
-const claimsKey contextKey = "auth_claims"
+const (
+	userIDKey contextKey = "user_id"
+	roleKey   contextKey = "role"
+)
 
-func WithClaims(
-	ctx context.Context,
-	claims Claims,
-) context.Context {
-	return context.WithValue(
-		ctx,
-		claimsKey,
-		claims,
-	)
+func WithUserID(ctx context.Context, userID int64) context.Context {
+	return context.WithValue(ctx, userIDKey, userID)
 }
 
-func ClaimsFromContext(
-	ctx context.Context,
-) (Claims, bool) {
-	claims, ok := ctx.Value(claimsKey).(Claims)
+func UserIDFromContext(ctx context.Context) (int64, bool) {
+	userID, ok := ctx.Value(userIDKey).(int64)
+	return userID, ok
+}
 
-	return claims, ok
+func WithRole(ctx context.Context, role string) context.Context {
+	return context.WithValue(ctx, roleKey, role)
+}
+
+func RoleFromContext(ctx context.Context) (string, bool) {
+	role, ok := ctx.Value(roleKey).(string)
+	return role, ok
 }

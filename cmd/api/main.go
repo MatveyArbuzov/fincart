@@ -5,7 +5,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"time"
 
 	"github.com/MatveyArbuzov/fincart/internal/auth"
 	"github.com/MatveyArbuzov/fincart/internal/database"
@@ -36,11 +35,18 @@ func main() {
 
 	jwtManager := auth.NewJWTManager(
 		jwtSecret,
-		24*time.Hour,
 	)
 
-	// User
+	refreshRepository := auth.NewPostgresRefreshTokenRepository()
 	userRepository := user.NewPostgresRepository()
+
+	refreshService := auth.NewRefreshService(
+		transactionManager,
+		refreshRepository,
+		userRepository,
+		jwtManager,
+	)
+	// User
 
 	userService := user.NewService(
 		transactionManager,
@@ -50,6 +56,7 @@ func main() {
 	userHandler := user.NewHandler(
 		userService,
 		jwtManager,
+		refreshService,
 	)
 
 	// Product
