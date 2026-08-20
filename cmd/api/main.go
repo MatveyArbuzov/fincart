@@ -22,7 +22,10 @@ func main() {
 
 	db, err := database.NewPostgres(ctx, dsn)
 	if err != nil {
-		log.Fatalf("failed to connect to database: %v", err)
+		log.Fatalf(
+			"failed to connect to database: %v",
+			err,
+		)
 	}
 	defer db.Close()
 
@@ -37,8 +40,11 @@ func main() {
 		jwtSecret,
 	)
 
-	refreshRepository := auth.NewPostgresRefreshTokenRepository()
-	userRepository := user.NewPostgresRepository()
+	refreshRepository :=
+		auth.NewPostgresRefreshTokenRepository()
+
+	userRepository :=
+		user.NewPostgresRepository()
 
 	refreshService := auth.NewRefreshService(
 		transactionManager,
@@ -46,6 +52,7 @@ func main() {
 		userRepository,
 		jwtManager,
 	)
+
 	// User
 
 	userService := user.NewService(
@@ -60,16 +67,28 @@ func main() {
 	)
 
 	// Product
-	productRepository := product.NewPostgresRepository(db)
-	productService := product.NewService(productRepository)
-	productHandler := product.NewHandler(productService)
 
-	// Order
-
-	paymentService := payment.NewFakeService(payment.ResultSuccess)
+	productRepository :=
+		product.NewPostgresRepository(db)
 
 	productTransactionRepository :=
 		product.NewPostgresTransactionRepository()
+
+	productService := product.NewService(
+		transactionManager,
+		productRepository,
+		productTransactionRepository,
+	)
+
+	productHandler :=
+		product.NewHandler(productService)
+
+	// Order
+
+	paymentService :=
+		payment.NewFakeService(
+			payment.ResultSuccess,
+		)
 
 	orderRepository :=
 		order.NewPostgresRepository()
@@ -81,9 +100,11 @@ func main() {
 		paymentService,
 	)
 
-	orderHandler := order.NewHandler(orderService)
+	orderHandler :=
+		order.NewHandler(orderService)
 
 	// HTTP
+
 	router := httpserver.NewRouter(
 		productHandler,
 		orderHandler,

@@ -1,5 +1,5 @@
 GET http://localhost:8080/api/v1/products
-GET http://localhost:8080/api/v1/products/1
+GET http://localhost:8080/api/v1/products/39
 
 
 POST /api/v1/orders HTTP/1.1
@@ -15,7 +15,7 @@ Content-Type: application/json
   ]
 } 
 
-GET http://localhost:8080/api/v1/orders/11
+GET http://localhost:8080/api/v1/orders/44
 
 
 POST http://localhost:8080/api/v1/orders/11/cancel
@@ -28,7 +28,7 @@ POST http://localhost:8080/api/v1/auth/register
 Content-Type: application/json
 
 {
-  "email": "user4@example.com",
+  "email": "user5@example.com",
   "password": "password123"
 }
 
@@ -38,10 +38,23 @@ POST http://localhost:8080/api/v1/auth/login
 Content-Type: application/json
 
 {
-  "email": "user4@example.com",
+  "email": "user5@example.com",
   "password": "password123"
 }
 
+POST http://localhost:8080/api/v1/auth/refresh
+Content-Type: application/json
+
+{
+  "refresh_token": "vyGthxuxCKHHeT_gPIgn6EDOkAeaHkJ5ZzmKiea6jnM"
+}
+
+POST http://localhost:8080/api/v1/auth/logout
+Content-Type: application/json
+
+{
+  "refresh_token": "W2AF7dfHsJqjoBAaIRNIYpwJnqKIoeXaCsbwYCPMuCs"
+}
 
 //create order 
 POST http://localhost:8080/api/v1/orders
@@ -59,20 +72,20 @@ Content-Type: application/json
 
 POST http://localhost:8080/api/v1/orders
 Content-Type: application/json
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoxOCwicm9sZSI6InVzZXIiLCJleHAiOjE3ODcwNTQyNzgsImlhdCI6MTc4Njk2Nzg3OH0.RH6DdidL_yVLS0OqoJGQ3CcRkrc_ZJCoiW7cGJpvz9E
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoyMiwicm9sZSI6InVzZXIiLCJleHAiOjE3ODcyMTUwMjMsIm5iZiI6MTc4NzIxNDEyMywiaWF0IjoxNzg3MjE0MTIzfQ.Vt6d838x7uSHGHV8C_B9K5kje_JWE8RAPlGSn5DW6d8
 
 {
   "items": [
     {
-      "product_id": 2,
+      "product_id": 3,
       "quantity": 1
     }
   ]
 }
 
 
-GET http://localhost:8080/api/v1/orders/43
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoxOCwicm9sZSI6InVzZXIiLCJleHAiOjE3ODcwNTQyNzgsImlhdCI6MTc4Njk2Nzg3OH0.RH6DdidL_yVLS0OqoJGQ3CcRkrc_ZJCoiW7cGJpvz9E
+GET http://localhost:8080/api/v1/orders/45
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoyMiwicm9sZSI6InVzZXIiLCJleHAiOjE3ODcyMTUwMjMsIm5iZiI6MTc4NzIxNDEyMywiaWF0IjoxNzg3MjE0MTIzfQ.Vt6d838x7uSHGHV8C_B9K5kje_JWE8RAPlGSn5DW6d8
 Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoxOSwicm9sZSI6InVzZXIiLCJleHAiOjE3ODcwNTQzMjQsImlhdCI6MTc4Njk2NzkyNH0.dO-zDCkHYhr-t9gwa2fQFZ-iyulitHhTqyrVoAQrBzU
 
 
@@ -97,8 +110,7 @@ Content-Type: application/json
 //от обычного и от адм
 GET http://localhost:8080/api/v1/admin/orders
 //Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoxOSwicm9sZSI6InVzZXIiLCJleHAiOjE3ODcwNTczODYsImlhdCI6MTc4Njk3MDk4Nn0.sNYoGgGhAoJ-owluNbluQzP2A8IzbblCJANYFAdsTDQ
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoyMCwicm9sZSI6ImFkbWluIiwiZXhwIjoxNzg3MDU3MzA1LCJpYXQiOjE3ODY5NzA5MDV9.irfhZmI2XzO9Hjy2xQy9wQieLcqGzkHJ1SpG0xxoLHs
-
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoyMCwicm9sZSI6ImFkbWluIiwiZXhwIjoxNzg3MjE0NDQ0LCJuYmYiOjE3ODcyMTM1NDQsImlhdCI6MTc4NzIxMzU0NH0.u7yyavcozDMFuqskdOZBXT4eZzlSvTGN1sPj0gdtJnc
 GET http://localhost:8080/api/v1/admin/orders
 
 PATCH http://localhost:8080/api/v1/admin/orders/42/status
@@ -108,3 +120,30 @@ Content-Type: application/json
 {
   "status": "pending"
 }
+
+POST http://localhost:8080/api/v1/admin/products
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoyMCwicm9sZSI6ImFkbWluIiwiZXhwIjoxNzg3MjE2ODY4LCJuYmYiOjE3ODcyMTU5NjgsImlhdCI6MTc4NzIxNTk2OH0.xw82HajcTCn6D_Hn1s9qauSXCeHr3l6sOtgpWjGlhrk
+Content-Type: application/json
+
+{
+  "name": "iPhone 17",
+  "description": "Apple smartphone",
+  "price": 99900,
+  "currency": "EUR",
+  "stock": 10
+}
+
+PATCH http://localhost:8080/api/v1/admin/products/39
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoyMCwicm9sZSI6ImFkbWluIiwiZXhwIjoxNzg3MjE2ODY4LCJuYmYiOjE3ODcyMTU5NjgsImlhdCI6MTc4NzIxNTk2OH0.xw82HajcTCn6D_Hn1s9qauSXCeHr3l6sOtgpWjGlhrk
+Content-Type: application/json
+
+{
+  "name": "iPhone 17 Pro",
+  "description": "Updated description",
+  "price": 119900,
+  "currency": "EUR",
+  "stock": 15
+}
+
+DELETE http://localhost:8080/api/v1/admin/products/39
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoyMCwicm9sZSI6ImFkbWluIiwiZXhwIjoxNzg3MjE2ODY4LCJuYmYiOjE3ODcyMTU5NjgsImlhdCI6MTc4NzIxNTk2OH0.xw82HajcTCn6D_Hn1s9qauSXCeHr3l6sOtgpWjGlhrk

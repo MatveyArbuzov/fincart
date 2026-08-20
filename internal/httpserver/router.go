@@ -20,6 +20,8 @@ func NewRouter(
 	authMiddleware := jwtManager.Middleware
 	adminMiddleware := auth.RequireRole("admin")
 
+	// Public products
+
 	mux.HandleFunc(
 		"GET /api/v1/products",
 		productHandler.GetProducts,
@@ -29,6 +31,8 @@ func NewRouter(
 		"GET /api/v1/products/{id}",
 		productHandler.GetProductByID,
 	)
+
+	// Auth
 
 	mux.HandleFunc(
 		"POST /api/v1/auth/register",
@@ -49,6 +53,43 @@ func NewRouter(
 		"POST /api/v1/auth/logout",
 		userHandler.Logout,
 	)
+
+	// Admin products
+
+	mux.Handle(
+		"POST /api/v1/admin/products",
+		authMiddleware(
+			adminMiddleware(
+				http.HandlerFunc(
+					productHandler.CreateProduct,
+				),
+			),
+		),
+	)
+
+	mux.Handle(
+		"PATCH /api/v1/admin/products/{id}",
+		authMiddleware(
+			adminMiddleware(
+				http.HandlerFunc(
+					productHandler.UpdateProduct,
+				),
+			),
+		),
+	)
+
+	mux.Handle(
+		"DELETE /api/v1/admin/products/{id}",
+		authMiddleware(
+			adminMiddleware(
+				http.HandlerFunc(
+					productHandler.DeleteProduct,
+				),
+			),
+		),
+	)
+
+	// Orders
 
 	mux.Handle(
 		"POST /api/v1/orders",
@@ -85,6 +126,8 @@ func NewRouter(
 			),
 		),
 	)
+
+	// Admin orders
 
 	mux.Handle(
 		"GET /api/v1/admin/orders",
