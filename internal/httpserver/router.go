@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/MatveyArbuzov/fincart/internal/auth"
+	"github.com/MatveyArbuzov/fincart/internal/cart"
 	"github.com/MatveyArbuzov/fincart/internal/order"
 	"github.com/MatveyArbuzov/fincart/internal/product"
 	"github.com/MatveyArbuzov/fincart/internal/user"
@@ -13,6 +14,7 @@ func NewRouter(
 	productHandler *product.Handler,
 	orderHandler *order.Handler,
 	userHandler *user.Handler,
+	cartHandler *cart.Handler,
 	jwtManager *auth.JWTManager,
 ) http.Handler {
 	mux := http.NewServeMux()
@@ -147,6 +149,51 @@ func NewRouter(
 				http.HandlerFunc(
 					orderHandler.UpdateOrderStatus,
 				),
+			),
+		),
+	)
+
+	mux.Handle(
+		"GET /api/v1/cart",
+		authMiddleware(
+			http.HandlerFunc(
+				cartHandler.GetCart,
+			),
+		),
+	)
+
+	mux.Handle(
+		"POST /api/v1/cart/items",
+		authMiddleware(
+			http.HandlerFunc(
+				cartHandler.AddItem,
+			),
+		),
+	)
+
+	mux.Handle(
+		"PATCH /api/v1/cart/items/{product_id}",
+		authMiddleware(
+			http.HandlerFunc(
+				cartHandler.UpdateItem,
+			),
+		),
+	)
+
+	mux.Handle(
+		"DELETE /api/v1/cart/items/{product_id}",
+		authMiddleware(
+			http.HandlerFunc(
+				cartHandler.DeleteItem,
+			),
+		),
+	)
+
+	mux.Handle(
+		"POST /api/v1/cart/checkout",
+		authMiddleware(
+			http.HandlerFunc(
+				cartHandler.Checkout,
 			),
 		),
 	)

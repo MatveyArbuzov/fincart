@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/MatveyArbuzov/fincart/internal/auth"
+	"github.com/MatveyArbuzov/fincart/internal/cart"
 	"github.com/MatveyArbuzov/fincart/internal/database"
 	"github.com/MatveyArbuzov/fincart/internal/httpserver"
 	"github.com/MatveyArbuzov/fincart/internal/order"
@@ -80,6 +81,20 @@ func main() {
 		productTransactionRepository,
 	)
 
+	// Cart
+
+	cartRepository := cart.NewPostgresRepository()
+
+	cartService := cart.NewService(
+		transactionManager,
+		cartRepository,
+		productTransactionRepository,
+	)
+
+	cartHandler := cart.NewHandler(
+		cartService,
+	)
+
 	productHandler :=
 		product.NewHandler(productService)
 
@@ -109,6 +124,7 @@ func main() {
 		productHandler,
 		orderHandler,
 		userHandler,
+		cartHandler,
 		jwtManager,
 	)
 

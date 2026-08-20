@@ -3,6 +3,7 @@ package order
 type OrderStatus string
 
 const (
+	OrderStatusDraft      OrderStatus = "draft"
 	OrderStatusPending    OrderStatus = "pending"
 	OrderStatusPaid       OrderStatus = "paid"
 	OrderStatusProcessing OrderStatus = "processing"
@@ -14,6 +15,7 @@ const (
 func (s OrderStatus) IsValid() bool {
 	switch s {
 	case
+		OrderStatusDraft,
 		OrderStatusPending,
 		OrderStatusPaid,
 		OrderStatusProcessing,
