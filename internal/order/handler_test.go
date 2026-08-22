@@ -1,1362 +1,1874 @@
 package order
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
-	"time"
 
-	"github.com/MatveyArbuzov/fincart/internal/database"
+	"github.com/MatveyArbuzov/fincart/internal/auth"
 	"github.com/MatveyArbuzov/fincart/internal/payment"
 	"github.com/MatveyArbuzov/fincart/internal/product"
 )
 
-type fakeTransactionManager struct{}
+const testJWTSecret = "test-secret"
 
-func (f *fakeTransactionManager) WithinTransaction(
-	ctx context.Context,
-	fn func(tx database.Tx) error,
-) error {
-	return fn(nil)
-}
+func authenticatedRequest(
+	t *testing.T,
+	method string,
+	target string,
+	body []byte,
+	userID int64,
+	role string,
+) *http.Request {
+	t.Helper()
 
-type fakeProductRepository struct {
-	product    product.Product
-	getByIDErr error
-}
-
-type fakeMultiProductRepository struct {
-	products map[int64]product.Product
-}
-
-func (f *fakeMultiProductRepository) GetByIDForUpdate(
-	ctx context.Context,
-	tx database.Tx,
-	id int64,
-) (product.Product, error) {
-	p, ok := f.products[id]
-	if !ok {
-		return product.Product{}, product.ErrProductNotFound
-	}
-
-	return p, nil
-}
-
-func (f *fakeMultiProductRepository) DecreaseStock(
-	ctx context.Context,
-	tx database.Tx,
-	id int64,
-	quantity int,
-) error {
-	return nil
-}
-
-func (f *fakeMultiProductRepository) IncreaseStock(
-	ctx context.Context,
-	tx database.Tx,
-	id int64,
-	quantity int,
-) error {
-	p, ok := f.products[id]
-	if !ok {
-		return product.ErrProductNotFound
-	}
-
-	p.Stock += quantity
-	f.products[id] = p
-
-	return nil
-}
-
-func (f *fakeProductRepository) GetByIDForUpdate(
-	ctx context.Context,
-	tx database.Tx,
-	id int64,
-) (product.Product, error) {
-	if f.getByIDErr != nil {
-		return product.Product{}, f.getByIDErr
-	}
-
-	if id != f.product.ID {
-		return product.Product{}, product.ErrProductNotFound
-	}
-
-	return f.product, nil
-}
-
-func (f *fakeProductRepository) DecreaseStock(
-	ctx context.Context,
-	tx database.Tx,
-	id int64,
-	quantity int,
-) error {
-	return nil
-}
-
-func (f *fakeProductRepository) IncreaseStock(
-	ctx context.Context,
-	tx database.Tx,
-	id int64,
-	quantity int,
-) error {
-	return nil
-}
-
-type fakeOrderRepository struct {
-	order     Order
-	orderItem OrderItem
-	items     []OrderItem
-}
-
-func (f *fakeOrderRepository) GetByID(
-	ctx context.Context,
-	tx database.Tx,
-	id int64,
-) (Order, error) {
-	if f.order.ID != id {
-		return Order{}, ErrOrderNotFound
-	}
-
-	return f.order, nil
-}
-
-func (f *fakeOrderRepository) Create(
-	ctx context.Context,
-	tx database.Tx,
-	order Order,
-) (Order, error) {
-	order.ID = 100
-	order.CreatedAt = time.Now()
-
-	f.order = order
-
-	return order, nil
-}
-
-func (f *fakeOrderRepository) GetByIDForUpdate(
-	ctx context.Context,
-	tx database.Tx,
-	id int64,
-) (Order, error) {
-	if f.order.ID != id {
-		return Order{}, ErrOrderNotFound
-	}
-
-	return f.order, nil
-}
-
-func (f *fakeOrderRepository) GetItems(
-	ctx context.Context,
-	tx database.Tx,
-	orderID int64,
-) ([]OrderItem, error) {
-	return f.items, nil
-}
-
-func (f *fakeOrderRepository) UpdateStatus(
-	ctx context.Context,
-	tx database.Tx,
-	orderID int64,
-	status string,
-) error {
-	if f.order.ID != orderID {
-		return ErrOrderNotFound
-	}
-
-	f.order.Status = status
-
-	return nil
-}
-
-func (f *fakeOrderRepository) CreateItem(
-	ctx context.Context,
-	tx database.Tx,
-	item OrderItem,
-) (OrderItem, error) {
-	item.ID = 1
-
-	f.orderItem = item
-
-	return item, nil
-}
-
-func TestCreateOrderHandler_Success(t *testing.T) {
-	productRepository := &fakeProductRepository{
-		product: product.Product{
-			ID:       1,
-			Name:     "MacBook",
-			Price:    150000,
-			Currency: "EUR",
-			Stock:    10,
-		},
-	}
-
-	orderRepository := &fakeOrderRepository{}
-
-	transactionManager := &fakeTransactionManager{}
-
-	service := NewService(
-		transactionManager,
-		productRepository,
-		orderRepository,
-		payment.NewFakeService(payment.ResultSuccess),
+	req := httptest.NewRequest(
+		method,
+		target,
+		bytes.NewReader(body),
 	)
 
-	handler := NewHandler(service)
+	jwtManager := auth.NewJWTManager(testJWTSecret)
 
-	body := `
+	token, err := jwtManager.GenerateToken(userID, role)
+	if err != nil {
+		t.Fatalf("failed to generate token: %v", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	return req
+}
+
+func serveAuthenticated(
+	t *testing.T,
+	handler http.Handler,
+	req *http.Request,
+) *httptest.ResponseRecorder {
+	t.Helper()
+
+	jwtManager := auth.NewJWTManager(testJWTSecret)
+
+	recorder := httptest.NewRecorder()
+
+	jwtManager.Middleware(handler).ServeHTTP(
+		recorder,
+		req,
+	)
+
+	return recorder
+}
+
+func setPathValue(
+	req *http.Request,
+	key string,
+	value string,
+) {
+	req.SetPathValue(key, value)
+}
+
+func decodeErrorResponse(
+	t *testing.T,
+	recorder *httptest.ResponseRecorder,
+) errorResponse {
+	t.Helper()
+
+	var response errorResponse
+
+	if err := json.Unmarshal(
+		recorder.Body.Bytes(),
+		&response,
+	); err != nil {
+		t.Fatalf(
+			"failed to decode error response: %v; body=%q",
+			err,
+			recorder.Body.String(),
+		)
+	}
+
+	return response
+}
+
+func newTestOrderHandler(
+	transactions TransactionManager,
+	products ProductRepository,
+	orders Repository,
+	paymentService payment.Service,
+) *Handler {
+	service := NewService(
+		transactions,
+		products,
+		orders,
+		paymentService,
+	)
+
+	return NewHandler(service)
+}
+
+func TestHandler_CreateOrder(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		body           []byte
+		userID         int64
+		role           string
+		products       *fakeOrderProductRepository
+		orders         *fakeOrderRepository
+		transactions   *fakeOrderTransactionManager
+		paymentService *fakePaymentService
+		authenticated  bool
+		wantStatus     int
+		wantError      string
+		wantOrder      *Order
+	}{
 		{
-			"items": [
-				{
-					"product_id": 1,
-					"quantity": 2
+			name:           "unauthorized",
+			body:           []byte(`{"items":[]}`),
+			authenticated:  false,
+			products:       &fakeOrderProductRepository{},
+			orders:         &fakeOrderRepository{},
+			transactions:   &fakeOrderTransactionManager{},
+			paymentService: &fakePaymentService{},
+			wantStatus:     http.StatusUnauthorized,
+			wantError:      "unauthorized",
+		},
+		{
+			name:           "invalid body",
+			body:           []byte(`{"items":`),
+			userID:         42,
+			role:           "user",
+			authenticated:  true,
+			products:       &fakeOrderProductRepository{},
+			orders:         &fakeOrderRepository{},
+			transactions:   &fakeOrderTransactionManager{},
+			paymentService: &fakePaymentService{},
+			wantStatus:     http.StatusBadRequest,
+			wantError:      "invalid_request_body",
+		},
+		{
+			name:           "invalid order",
+			body:           []byte(`{"items":[]}`),
+			userID:         42,
+			role:           "user",
+			authenticated:  true,
+			products:       &fakeOrderProductRepository{},
+			orders:         &fakeOrderRepository{},
+			transactions:   &fakeOrderTransactionManager{},
+			paymentService: &fakePaymentService{},
+			wantStatus:     http.StatusBadRequest,
+			wantError:      "invalid_order",
+		},
+		{
+			name: "insufficient stock",
+			body: []byte(`{
+				"items": [
+					{
+						"product_id": 1,
+						"quantity": 5
+					}
+				]
+			}`),
+			userID:        42,
+			role:          "user",
+			authenticated: true,
+			products: &fakeOrderProductRepository{
+				products: map[int64]product.Product{
+					1: {
+						ID:       1,
+						Price:    100,
+						Currency: "USD",
+						Stock:    2,
+					},
+				},
+			},
+			orders:         &fakeOrderRepository{},
+			transactions:   &fakeOrderTransactionManager{},
+			paymentService: &fakePaymentService{},
+			wantStatus:     http.StatusConflict,
+			wantError:      "insufficient_stock",
+		},
+		{
+			name: "product not found",
+			body: []byte(`{
+				"items": [
+					{
+						"product_id": 999,
+						"quantity": 1
+					}
+				]
+			}`),
+			userID:        42,
+			role:          "user",
+			authenticated: true,
+			products: &fakeOrderProductRepository{
+				products: map[int64]product.Product{},
+			},
+			orders:         &fakeOrderRepository{},
+			transactions:   &fakeOrderTransactionManager{},
+			paymentService: &fakePaymentService{},
+			wantStatus:     http.StatusNotFound,
+			wantError:      "product_not_found",
+		},
+		{
+			name: "different currencies",
+			body: []byte(`{
+				"items": [
+					{
+						"product_id": 1,
+						"quantity": 1
+					},
+					{
+						"product_id": 2,
+						"quantity": 1
+					}
+				]
+			}`),
+			userID:        42,
+			role:          "user",
+			authenticated: true,
+			products: &fakeOrderProductRepository{
+				products: map[int64]product.Product{
+					1: {
+						ID:       1,
+						Price:    100,
+						Currency: "USD",
+						Stock:    10,
+					},
+					2: {
+						ID:       2,
+						Price:    200,
+						Currency: "EUR",
+						Stock:    10,
+					},
+				},
+			},
+			orders:         &fakeOrderRepository{},
+			transactions:   &fakeOrderTransactionManager{},
+			paymentService: &fakePaymentService{},
+			wantStatus:     http.StatusBadRequest,
+			wantError:      "different_currencies",
+		},
+		{
+			name: "repository error",
+			body: []byte(`{
+				"items": [
+					{
+						"product_id": 1,
+						"quantity": 1
+					}
+				]
+			}`),
+			userID:        42,
+			role:          "user",
+			authenticated: true,
+			products: &fakeOrderProductRepository{
+				products: map[int64]product.Product{
+					1: {
+						ID:       1,
+						Price:    100,
+						Currency: "USD",
+						Stock:    10,
+					},
+				},
+			},
+			orders: &fakeOrderRepository{
+				createErr: errors.New("database unavailable"),
+			},
+			transactions:   &fakeOrderTransactionManager{},
+			paymentService: &fakePaymentService{},
+			wantStatus:     http.StatusInternalServerError,
+			wantError:      "internal_server_error",
+		},
+		{
+			name: "transaction error",
+			body: []byte(`{
+				"items": [
+					{
+						"product_id": 1,
+						"quantity": 1
+					}
+				]
+			}`),
+			userID:        42,
+			role:          "user",
+			authenticated: true,
+			products: &fakeOrderProductRepository{
+				products: map[int64]product.Product{
+					1: {
+						ID:       1,
+						Price:    100,
+						Currency: "USD",
+						Stock:    10,
+					},
+				},
+			},
+			orders: &fakeOrderRepository{},
+			transactions: &fakeOrderTransactionManager{
+				err: errors.New("transaction failed"),
+			},
+			paymentService: &fakePaymentService{},
+			wantStatus:     http.StatusInternalServerError,
+			wantError:      "internal_server_error",
+		},
+		{
+			name: "success",
+			body: []byte(`{
+				"items": [
+					{
+						"product_id": 1,
+						"quantity": 2
+					}
+				]
+			}`),
+			userID:        42,
+			role:          "user",
+			authenticated: true,
+			products: &fakeOrderProductRepository{
+				products: map[int64]product.Product{
+					1: {
+						ID:       1,
+						Name:     "Phone",
+						Price:    100,
+						Currency: "USD",
+						Stock:    10,
+					},
+				},
+			},
+			orders:         &fakeOrderRepository{},
+			transactions:   &fakeOrderTransactionManager{},
+			paymentService: &fakePaymentService{},
+			wantStatus:     http.StatusCreated,
+			wantOrder: &Order{
+				ID:          100,
+				UserID:      42,
+				TotalAmount: 200,
+				Currency:    "USD",
+				Status:      string(OrderStatusPending),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler := newTestOrderHandler(
+				tt.transactions,
+				tt.products,
+				tt.orders,
+				tt.paymentService,
+			)
+
+			var req *http.Request
+
+			if tt.authenticated {
+				req = authenticatedRequest(
+					t,
+					http.MethodPost,
+					"/api/v1/orders",
+					tt.body,
+					tt.userID,
+					tt.role,
+				)
+			} else {
+				req = httptest.NewRequest(
+					http.MethodPost,
+					"/api/v1/orders",
+					bytes.NewReader(tt.body),
+				)
+			}
+
+			recorder := httptest.NewRecorder()
+
+			if tt.authenticated {
+				recorder = serveAuthenticated(
+					t,
+					http.HandlerFunc(handler.CreateOrder),
+					req,
+				)
+			} else {
+				handler.CreateOrder(recorder, req)
+			}
+
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf(
+					"status = %d, want %d; body=%q",
+					recorder.Code,
+					tt.wantStatus,
+					recorder.Body.String(),
+				)
+			}
+
+			if tt.wantError != "" {
+				response := decodeErrorResponse(t, recorder)
+
+				if response.Error != tt.wantError {
+					t.Fatalf(
+						"error = %q, want %q",
+						response.Error,
+						tt.wantError,
+					)
 				}
-			]
-		}
-	`
 
-	request := httptest.NewRequest(
-		http.MethodPost,
-		"/api/v1/orders",
-		strings.NewReader(body),
-	)
-
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-User-ID", "10")
-
-	recorder := httptest.NewRecorder()
-
-	handler.CreateOrder(recorder, request)
-
-	if recorder.Code != http.StatusCreated {
-		t.Fatalf(
-			"expected status %d, got %d",
-			http.StatusCreated,
-			recorder.Code,
-		)
-	}
-
-	if contentType := recorder.Header().Get("Content-Type"); contentType != "application/json" {
-		t.Fatalf(
-			"expected Content-Type application/json, got %s",
-			contentType,
-		)
-	}
-
-	var response Order
-
-	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
-		t.Fatalf(
-			"failed to decode response: %v",
-			err,
-		)
-	}
-
-	if response.ID != 100 {
-		t.Fatalf(
-			"expected order ID 100, got %d",
-			response.ID,
-		)
-	}
-
-	if response.UserID != 10 {
-		t.Fatalf(
-			"expected user ID 10, got %d",
-			response.UserID,
-		)
-	}
-
-	if response.Status != "pending" {
-		t.Fatalf(
-			"expected status pending, got %s",
-			response.Status,
-		)
-	}
-
-	if response.TotalAmount != 300000 {
-		t.Fatalf(
-			"expected total amount 300000, got %d",
-			response.TotalAmount,
-		)
-	}
-
-	if response.Currency != "EUR" {
-		t.Fatalf(
-			"expected currency EUR, got %s",
-			response.Currency,
-		)
-	}
-}
-
-func TestCreateOrderHandler_InvalidJSON(t *testing.T) {
-	productRepository := &fakeProductRepository{
-		product: product.Product{
-			ID:       1,
-			Name:     "MacBook",
-			Price:    150000,
-			Currency: "EUR",
-			Stock:    10,
-		},
-	}
-
-	orderRepository := &fakeOrderRepository{}
-	transactionManager := &fakeTransactionManager{}
-
-	service := NewService(
-		transactionManager,
-		productRepository,
-		orderRepository,
-		payment.NewFakeService(payment.ResultSuccess),
-	)
-
-	handler := NewHandler(service)
-
-	body := `{
-		"items": [
-			{
-				"product_id": 1,
-				"quantity":
+				return
 			}
-		]
-	}`
 
-	request := httptest.NewRequest(
-		http.MethodPost,
-		"/api/v1/orders",
-		strings.NewReader(body),
-	)
-
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-User-ID", "10")
-
-	recorder := httptest.NewRecorder()
-
-	handler.CreateOrder(recorder, request)
-
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf(
-			"expected status %d, got %d",
-			http.StatusBadRequest,
-			recorder.Code,
-		)
-	}
-
-	var response errorResponse
-
-	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
-		t.Fatalf(
-			"failed to decode error response: %v",
-			err,
-		)
-	}
-
-	if response.Error != "invalid_request_body" {
-		t.Fatalf(
-			"expected error invalid_request_body, got %s",
-			response.Error,
-		)
-	}
-}
-
-func TestCreateOrderHandler_InvalidUserID(t *testing.T) {
-	productRepository := &fakeProductRepository{
-		product: product.Product{
-			ID:       1,
-			Name:     "MacBook",
-			Price:    150000,
-			Currency: "EUR",
-			Stock:    10,
-		},
-	}
-
-	orderRepository := &fakeOrderRepository{}
-	transactionManager := &fakeTransactionManager{}
-
-	service := NewService(
-		transactionManager,
-		productRepository,
-		orderRepository,
-		payment.NewFakeService(payment.ResultSuccess),
-	)
-
-	handler := NewHandler(service)
-
-	body := `{
-		"items": [
-			{
-				"product_id": 1,
-				"quantity": 2
+			if tt.wantOrder == nil {
+				return
 			}
-		]
-	}`
 
-	request := httptest.NewRequest(
-		http.MethodPost,
-		"/api/v1/orders",
-		strings.NewReader(body),
-	)
-
-	request.Header.Set("Content-Type", "application/json")
-
-	// X-User-ID специально не устанавливаем.
-
-	recorder := httptest.NewRecorder()
-
-	handler.CreateOrder(recorder, request)
-
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf(
-			"expected status %d, got %d",
-			http.StatusBadRequest,
-			recorder.Code,
-		)
-	}
-}
-
-func TestCreateOrderHandler_InsufficientStock(t *testing.T) {
-	productRepository := &fakeProductRepository{
-		product: product.Product{
-			ID:       1,
-			Name:     "MacBook",
-			Price:    150000,
-			Currency: "EUR",
-			Stock:    2,
-		},
-	}
-
-	orderRepository := &fakeOrderRepository{}
-	transactionManager := &fakeTransactionManager{}
-
-	service := NewService(
-		transactionManager,
-		productRepository,
-		orderRepository,
-		payment.NewFakeService(payment.ResultSuccess),
-	)
-
-	handler := NewHandler(service)
-
-	body := `{
-		"items": [
-			{
-				"product_id": 1,
-				"quantity": 5
+			if recorder.Header().Get("Content-Type") != "application/json" {
+				t.Fatalf(
+					"Content-Type = %q, want application/json",
+					recorder.Header().Get("Content-Type"),
+				)
 			}
-		]
-	}`
 
-	request := httptest.NewRequest(
-		http.MethodPost,
-		"/api/v1/orders",
-		strings.NewReader(body),
-	)
+			var got Order
 
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-User-ID", "10")
-
-	recorder := httptest.NewRecorder()
-
-	handler.CreateOrder(recorder, request)
-
-	if recorder.Code != http.StatusConflict {
-		t.Fatalf(
-			"expected status %d, got %d",
-			http.StatusConflict,
-			recorder.Code,
-		)
-	}
-
-	var response errorResponse
-
-	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
-		t.Fatalf(
-			"failed to decode error response: %v",
-			err,
-		)
-	}
-
-	if response.Error != "insufficient_stock" {
-		t.Fatalf(
-			"expected error insufficient_stock, got %s",
-			response.Error,
-		)
-	}
-}
-
-func TestCreateOrderHandler_InternalServerError(t *testing.T) {
-	productRepository := &fakeProductRepository{
-		getByIDErr: errors.New("database connection failed"),
-	}
-
-	orderRepository := &fakeOrderRepository{}
-	transactionManager := &fakeTransactionManager{}
-
-	service := NewService(
-		transactionManager,
-		productRepository,
-		orderRepository,
-		payment.NewFakeService(payment.ResultSuccess),
-	)
-
-	handler := NewHandler(service)
-
-	body := `{
-		"items": [
-			{
-				"product_id": 1,
-				"quantity": 2
+			if err := json.Unmarshal(
+				recorder.Body.Bytes(),
+				&got,
+			); err != nil {
+				t.Fatalf("failed to decode response: %v", err)
 			}
-		]
-	}`
 
-	request := httptest.NewRequest(
-		http.MethodPost,
-		"/api/v1/orders",
-		strings.NewReader(body),
-	)
-
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-User-ID", "10")
-
-	recorder := httptest.NewRecorder()
-
-	handler.CreateOrder(recorder, request)
-
-	if recorder.Code != http.StatusInternalServerError {
-		t.Fatalf(
-			"expected status %d, got %d",
-			http.StatusInternalServerError,
-			recorder.Code,
-		)
-	}
-}
-
-func TestCreateOrderHandler_ZeroQuantity(t *testing.T) {
-	productRepository := &fakeProductRepository{
-		product: product.Product{
-			ID:       1,
-			Name:     "MacBook",
-			Price:    150000,
-			Currency: "EUR",
-			Stock:    10,
-		},
-	}
-
-	orderRepository := &fakeOrderRepository{}
-	transactionManager := &fakeTransactionManager{}
-
-	service := NewService(
-		transactionManager,
-		productRepository,
-		orderRepository,
-		payment.NewFakeService(payment.ResultSuccess),
-	)
-
-	handler := NewHandler(service)
-
-	body := `{
-		"items": [
-			{
-				"product_id": 1,
-				"quantity": 0
+			if got != *tt.wantOrder {
+				t.Fatalf(
+					"order = %+v, want %+v",
+					got,
+					*tt.wantOrder,
+				)
 			}
-		]
-	}`
-
-	request := httptest.NewRequest(
-		http.MethodPost,
-		"/api/v1/orders",
-		strings.NewReader(body),
-	)
-
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-User-ID", "10")
-
-	recorder := httptest.NewRecorder()
-
-	handler.CreateOrder(recorder, request)
-
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf(
-			"expected status %d, got %d",
-			http.StatusBadRequest,
-			recorder.Code,
-		)
-	}
-
-	var response errorResponse
-
-	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
-		t.Fatalf(
-			"failed to decode error response: %v",
-			err,
-		)
-	}
-
-	if response.Error != "invalid_order" {
-		t.Fatalf(
-			"expected error invalid_order, got %s",
-			response.Error,
-		)
+		})
 	}
 }
 
-func TestCreateOrderHandler_NegativeQuantity(t *testing.T) {
-	productRepository := &fakeProductRepository{
-		product: product.Product{
-			ID:       1,
-			Name:     "MacBook",
-			Price:    150000,
-			Currency: "EUR",
-			Stock:    10,
+func TestHandler_CancelOrder(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		id            string
+		userID        int64
+		orders        *fakeOrderRepository
+		transactions  *fakeOrderTransactionManager
+		authenticated bool
+		usePathValue  bool
+		wantStatus    int
+		wantError     string
+	}{
+		{
+			name:          "unauthorized",
+			id:            "10",
+			userID:        42,
+			orders:        &fakeOrderRepository{},
+			transactions:  &fakeOrderTransactionManager{},
+			authenticated: false,
+			usePathValue:  true,
+			wantStatus:    http.StatusUnauthorized,
+		},
+		{
+			name:          "empty id",
+			id:            "",
+			userID:        42,
+			orders:        &fakeOrderRepository{},
+			transactions:  &fakeOrderTransactionManager{},
+			authenticated: true,
+			usePathValue:  true,
+			wantStatus:    http.StatusBadRequest,
+			wantError:     "invalid_order_id",
+		},
+		{
+			name:          "non numeric id",
+			id:            "abc",
+			userID:        42,
+			orders:        &fakeOrderRepository{},
+			transactions:  &fakeOrderTransactionManager{},
+			authenticated: true,
+			usePathValue:  true,
+			wantStatus:    http.StatusBadRequest,
+			wantError:     "invalid_order_id",
+		},
+		{
+			name:          "zero id",
+			id:            "0",
+			userID:        42,
+			orders:        &fakeOrderRepository{},
+			transactions:  &fakeOrderTransactionManager{},
+			authenticated: true,
+			usePathValue:  true,
+			wantStatus:    http.StatusBadRequest,
+			wantError:     "invalid_order_id",
+		},
+		{
+			name:          "negative id",
+			id:            "-1",
+			userID:        42,
+			orders:        &fakeOrderRepository{},
+			transactions:  &fakeOrderTransactionManager{},
+			authenticated: true,
+			usePathValue:  true,
+			wantStatus:    http.StatusBadRequest,
+			wantError:     "invalid_order_id",
+		},
+		{
+			name: "not found",
+			id:   "10",
+			orders: &fakeOrderRepository{
+				getByIDForUpdateErr: ErrOrderNotFound,
+			},
+			transactions:  &fakeOrderTransactionManager{},
+			authenticated: true,
+			usePathValue:  true,
+			userID:        42,
+			wantStatus:    http.StatusNotFound,
+			wantError:     "order_not_found",
+		},
+		{
+			name: "forbidden",
+			id:   "10",
+			orders: &fakeOrderRepository{
+				order: Order{
+					ID:     10,
+					UserID: 999,
+					Status: string(OrderStatusPending),
+				},
+			},
+			transactions:  &fakeOrderTransactionManager{},
+			authenticated: true,
+			usePathValue:  true,
+			userID:        42,
+			wantStatus:    http.StatusForbidden,
+			wantError:     "order_forbidden",
+		},
+		{
+			name: "invalid state",
+			id:   "10",
+			orders: &fakeOrderRepository{
+				order: Order{
+					ID:     10,
+					UserID: 42,
+					Status: string(OrderStatusPaid),
+				},
+			},
+			transactions:  &fakeOrderTransactionManager{},
+			authenticated: true,
+			usePathValue:  true,
+			userID:        42,
+			wantStatus:    http.StatusConflict,
+			wantError:     "invalid_order_state",
+		},
+		{
+			name: "repository error",
+			id:   "10",
+			orders: &fakeOrderRepository{
+				order: Order{
+					ID:     10,
+					UserID: 42,
+					Status: string(OrderStatusPending),
+				},
+				getItemsErr: errors.New("database error"),
+			},
+			transactions:  &fakeOrderTransactionManager{},
+			authenticated: true,
+			usePathValue:  true,
+			userID:        42,
+			wantStatus:    http.StatusInternalServerError,
+			wantError:     "internal_server_error",
+		},
+		{
+			name: "transaction error",
+			id:   "10",
+			orders: &fakeOrderRepository{
+				order: Order{
+					ID:     10,
+					UserID: 42,
+					Status: string(OrderStatusPending),
+				},
+			},
+			transactions: &fakeOrderTransactionManager{
+				err: errors.New("transaction failed"),
+			},
+			authenticated: true,
+			usePathValue:  true,
+			userID:        42,
+			wantStatus:    http.StatusInternalServerError,
+			wantError:     "internal_server_error",
+		},
+		{
+			name: "success",
+			id:   "10",
+			orders: &fakeOrderRepository{
+				order: Order{
+					ID:     10,
+					UserID: 42,
+					Status: string(OrderStatusPending),
+				},
+			},
+			transactions:  &fakeOrderTransactionManager{},
+			authenticated: true,
+			usePathValue:  true,
+			userID:        42,
+			wantStatus:    http.StatusNoContent,
+		},
+		{
+			name: "fallback path parsing",
+			id:   "10",
+			orders: &fakeOrderRepository{
+				order: Order{
+					ID:     10,
+					UserID: 42,
+					Status: string(OrderStatusPending),
+				},
+			},
+			transactions:  &fakeOrderTransactionManager{},
+			authenticated: true,
+			usePathValue:  false,
+			userID:        42,
+			wantStatus:    http.StatusNoContent,
 		},
 	}
 
-	orderRepository := &fakeOrderRepository{}
-	transactionManager := &fakeTransactionManager{}
+	for _, tt := range tests {
+		tt := tt
 
-	service := NewService(
-		transactionManager,
-		productRepository,
-		orderRepository,
-		payment.NewFakeService(payment.ResultSuccess),
-	)
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	handler := NewHandler(service)
+			handler := newTestOrderHandler(
+				tt.transactions,
+				&fakeOrderProductRepository{},
+				tt.orders,
+				&fakePaymentService{},
+			)
 
-	body := `{
-		"items": [
-			{
-				"product_id": 1,
-				"quantity": -1
+			req := authenticatedRequest(
+				t,
+				http.MethodPost,
+				"/api/v1/orders/"+tt.id+"/cancel",
+				nil,
+				tt.userID,
+				"user",
+			)
+
+			if tt.usePathValue {
+				setPathValue(req, "id", tt.id)
 			}
-		]
-	}`
 
-	request := httptest.NewRequest(
-		http.MethodPost,
-		"/api/v1/orders",
-		strings.NewReader(body),
-	)
+			var recorder *httptest.ResponseRecorder
 
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-User-ID", "10")
-
-	recorder := httptest.NewRecorder()
-
-	handler.CreateOrder(recorder, request)
-
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf(
-			"expected status %d, got %d",
-			http.StatusBadRequest,
-			recorder.Code,
-		)
-	}
-
-	var response errorResponse
-
-	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
-		t.Fatalf(
-			"failed to decode error response: %v",
-			err,
-		)
-	}
-
-	if response.Error != "invalid_order" {
-		t.Fatalf(
-			"expected error invalid_order, got %s",
-			response.Error,
-		)
-	}
-}
-
-func TestCreateOrderHandler_EmptyItems(t *testing.T) {
-	productRepository := &fakeProductRepository{}
-
-	orderRepository := &fakeOrderRepository{}
-	transactionManager := &fakeTransactionManager{}
-
-	service := NewService(
-		transactionManager,
-		productRepository,
-		orderRepository,
-		payment.NewFakeService(payment.ResultSuccess),
-	)
-
-	handler := NewHandler(service)
-
-	body := `{
-		"items": []
-	}`
-
-	request := httptest.NewRequest(
-		http.MethodPost,
-		"/api/v1/orders",
-		strings.NewReader(body),
-	)
-
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-User-ID", "10")
-
-	recorder := httptest.NewRecorder()
-
-	handler.CreateOrder(recorder, request)
-
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf(
-			"expected status %d, got %d",
-			http.StatusBadRequest,
-			recorder.Code,
-		)
-	}
-
-	var response errorResponse
-
-	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
-		t.Fatalf(
-			"failed to decode error response: %v",
-			err,
-		)
-	}
-
-	if response.Error != "invalid_order" {
-		t.Fatalf(
-			"expected error invalid_order, got %s",
-			response.Error,
-		)
-	}
-}
-
-func TestCreateOrderHandler_ZeroProductID(t *testing.T) {
-	productRepository := &fakeProductRepository{}
-
-	orderRepository := &fakeOrderRepository{}
-	transactionManager := &fakeTransactionManager{}
-
-	service := NewService(
-		transactionManager,
-		productRepository,
-		orderRepository,
-		payment.NewFakeService(payment.ResultSuccess),
-	)
-
-	handler := NewHandler(service)
-
-	body := `{
-		"items": [
-			{
-				"product_id": 0,
-				"quantity": 1
+			if tt.authenticated {
+				recorder = serveAuthenticated(
+					t,
+					http.HandlerFunc(handler.CancelOrder),
+					req,
+				)
+			} else {
+				recorder = httptest.NewRecorder()
+				handler.CancelOrder(recorder, httptest.NewRequest(
+					http.MethodPost,
+					"/api/v1/orders/"+tt.id+"/cancel",
+					nil,
+				))
 			}
-		]
-	}`
 
-	request := httptest.NewRequest(
-		http.MethodPost,
-		"/api/v1/orders",
-		strings.NewReader(body),
-	)
-
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-User-ID", "10")
-
-	recorder := httptest.NewRecorder()
-
-	handler.CreateOrder(recorder, request)
-
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf(
-			"expected status %d, got %d",
-			http.StatusBadRequest,
-			recorder.Code,
-		)
-	}
-
-	var response errorResponse
-
-	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
-		t.Fatalf(
-			"failed to decode error response: %v",
-			err,
-		)
-	}
-
-	if response.Error != "invalid_order" {
-		t.Fatalf(
-			"expected error invalid_order, got %s",
-			response.Error,
-		)
-	}
-}
-
-func TestCreateOrderHandler_NegativeProductID(t *testing.T) {
-	productRepository := &fakeProductRepository{}
-
-	orderRepository := &fakeOrderRepository{}
-	transactionManager := &fakeTransactionManager{}
-
-	service := NewService(
-		transactionManager,
-		productRepository,
-		orderRepository,
-		payment.NewFakeService(payment.ResultSuccess),
-	)
-
-	handler := NewHandler(service)
-
-	body := `{
-		"items": [
-			{
-				"product_id": -1,
-				"quantity": 1
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf(
+					"status = %d, want %d; body=%q",
+					recorder.Code,
+					tt.wantStatus,
+					recorder.Body.String(),
+				)
 			}
-		]
-	}`
 
-	request := httptest.NewRequest(
-		http.MethodPost,
-		"/api/v1/orders",
-		strings.NewReader(body),
-	)
+			if tt.wantError != "" {
+				response := decodeErrorResponse(t, recorder)
 
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-User-ID", "10")
+				if response.Error != tt.wantError {
+					t.Fatalf(
+						"error = %q, want %q",
+						response.Error,
+						tt.wantError,
+					)
+				}
 
-	recorder := httptest.NewRecorder()
-
-	handler.CreateOrder(recorder, request)
-
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf(
-			"expected status %d, got %d",
-			http.StatusBadRequest,
-			recorder.Code,
-		)
-	}
-}
-
-func TestCreateOrderHandler_ProductNotFound(t *testing.T) {
-	productRepository := &fakeProductRepository{
-		product: product.Product{
-			ID:       1,
-			Name:     "MacBook",
-			Price:    150000,
-			Currency: "EUR",
-			Stock:    10,
-		},
-	}
-
-	orderRepository := &fakeOrderRepository{}
-	transactionManager := &fakeTransactionManager{}
-
-	service := NewService(
-		transactionManager,
-		productRepository,
-		orderRepository,
-		payment.NewFakeService(payment.ResultSuccess),
-	)
-
-	handler := NewHandler(service)
-
-	body := `{
-		"items": [
-			{
-				"product_id": 999999,
-				"quantity": 1
+				return
 			}
-		]
-	}`
 
-	request := httptest.NewRequest(
-		http.MethodPost,
-		"/api/v1/orders",
-		strings.NewReader(body),
-	)
-
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-User-ID", "10")
-
-	recorder := httptest.NewRecorder()
-
-	handler.CreateOrder(recorder, request)
-
-	if recorder.Code != http.StatusNotFound {
-		t.Fatalf(
-			"expected status %d, got %d",
-			http.StatusNotFound,
-			recorder.Code,
-		)
-	}
-
-	var response errorResponse
-
-	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
-		t.Fatalf(
-			"failed to decode error response: %v",
-			err,
-		)
-	}
-
-	if response.Error != "product_not_found" {
-		t.Fatalf(
-			"expected error product_not_found, got %s",
-			response.Error,
-		)
+			if tt.wantStatus == http.StatusNoContent &&
+				recorder.Body.Len() != 0 {
+				t.Fatalf(
+					"body = %q, want empty",
+					recorder.Body.String(),
+				)
+			}
+		})
 	}
 }
 
-func TestCancelOrderHandler_Success(t *testing.T) {
-	productRepository := &fakeProductRepository{}
+func TestHandler_GetOrder(t *testing.T) {
+	t.Parallel()
 
-	orderRepository := &fakeOrderRepository{
-		order: Order{
-			ID:     100,
-			UserID: 10,
-			Status: "pending",
+	wantOrder := Order{
+		ID:          10,
+		UserID:      42,
+		Status:      string(OrderStatusPending),
+		TotalAmount: 300,
+		Currency:    "USD",
+	}
+
+	wantItems := []OrderItem{
+		{
+			ID:        1,
+			OrderID:   10,
+			ProductID: 5,
+			Quantity:  2,
+			UnitPrice: 150,
 		},
 	}
 
-	transactionManager := &fakeTransactionManager{}
-
-	service := NewService(
-		transactionManager,
-		productRepository,
-		orderRepository,
-		payment.NewFakeService(payment.ResultSuccess),
-	)
-
-	handler := NewHandler(service)
-
-	request := httptest.NewRequest(
-		http.MethodPost,
-		"/api/v1/orders/100/cancel",
-		nil,
-	)
-	request.Header.Set("X-User-ID", "10")
-
-	recorder := httptest.NewRecorder()
-
-	handler.CancelOrder(recorder, request)
-
-	if recorder.Code != http.StatusNoContent {
-		t.Fatalf(
-			"expected status %d, got %d",
-			http.StatusNoContent,
-			recorder.Code,
-		)
-	}
-}
-
-func TestCancelOrderHandler_InvalidOrderID(t *testing.T) {
-	productRepository := &fakeProductRepository{}
-	orderRepository := &fakeOrderRepository{}
-	transactionManager := &fakeTransactionManager{}
-
-	service := NewService(
-		transactionManager,
-		productRepository,
-		orderRepository,
-		payment.NewFakeService(payment.ResultSuccess),
-	)
-
-	handler := NewHandler(service)
-
-	request := httptest.NewRequest(
-		http.MethodPost,
-		"/api/v1/orders/abc/cancel",
-		nil,
-	)
-
-	recorder := httptest.NewRecorder()
-
-	handler.CancelOrder(recorder, request)
-
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf(
-			"expected status %d, got %d",
-			http.StatusBadRequest,
-			recorder.Code,
-		)
-	}
-
-	var response errorResponse
-
-	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
-		t.Fatalf(
-			"failed to decode response: %v",
-			err,
-		)
-	}
-
-	if response.Error != "invalid_order_id" {
-		t.Fatalf(
-			"expected invalid_order_id, got %s",
-			response.Error,
-		)
-	}
-}
-
-func TestCancelOrderHandler_OrderNotFound(t *testing.T) {
-	productRepository := &fakeProductRepository{}
-
-	orderRepository := &fakeOrderRepository{
-		order: Order{
-			ID:     100,
-			Status: "pending",
+	tests := []struct {
+		name          string
+		id            string
+		userID        int64
+		orders        *fakeOrderRepository
+		transactions  *fakeOrderTransactionManager
+		authenticated bool
+		wantStatus    int
+		wantError     string
+		wantOrder     *Order
+		wantItems     []OrderItem
+	}{
+		{
+			name:          "unauthorized",
+			id:            "10",
+			userID:        42,
+			orders:        &fakeOrderRepository{},
+			transactions:  &fakeOrderTransactionManager{},
+			authenticated: false,
+			wantStatus:    http.StatusUnauthorized,
+		},
+		{
+			name:          "invalid id",
+			id:            "abc",
+			userID:        42,
+			orders:        &fakeOrderRepository{},
+			transactions:  &fakeOrderTransactionManager{},
+			authenticated: true,
+			wantStatus:    http.StatusBadRequest,
+			wantError:     "invalid_order_id",
+		},
+		{
+			name: "not found",
+			id:   "10",
+			orders: &fakeOrderRepository{
+				getByIDErr: ErrOrderNotFound,
+			},
+			transactions:  &fakeOrderTransactionManager{},
+			authenticated: true,
+			userID:        42,
+			wantStatus:    http.StatusNotFound,
+			wantError:     "order_not_found",
+		},
+		{
+			name: "forbidden",
+			id:   "10",
+			orders: &fakeOrderRepository{
+				order: Order{
+					ID:     10,
+					UserID: 99,
+				},
+			},
+			transactions:  &fakeOrderTransactionManager{},
+			authenticated: true,
+			userID:        42,
+			wantStatus:    http.StatusForbidden,
+			wantError:     "order_forbidden",
+		},
+		{
+			name: "repository error",
+			id:   "10",
+			orders: &fakeOrderRepository{
+				order: Order{
+					ID:     10,
+					UserID: 42,
+				},
+				getItemsErr: errors.New("database error"),
+			},
+			transactions:  &fakeOrderTransactionManager{},
+			authenticated: true,
+			userID:        42,
+			wantStatus:    http.StatusInternalServerError,
+			wantError:     "internal_server_error",
+		},
+		{
+			name: "transaction error",
+			id:   "10",
+			orders: &fakeOrderRepository{
+				order: Order{
+					ID:     10,
+					UserID: 42,
+				},
+			},
+			transactions: &fakeOrderTransactionManager{
+				err: errors.New("transaction failed"),
+			},
+			authenticated: true,
+			userID:        42,
+			wantStatus:    http.StatusInternalServerError,
+			wantError:     "internal_server_error",
+		},
+		{
+			name:          "success",
+			id:            "10",
+			userID:        42,
+			orders:        &fakeOrderRepository{order: wantOrder, items: wantItems},
+			transactions:  &fakeOrderTransactionManager{},
+			authenticated: true,
+			wantStatus:    http.StatusOK,
+			wantOrder:     &wantOrder,
+			wantItems:     wantItems,
 		},
 	}
 
-	transactionManager := &fakeTransactionManager{}
+	for _, tt := range tests {
+		tt := tt
 
-	service := NewService(
-		transactionManager,
-		productRepository,
-		orderRepository,
-		payment.NewFakeService(payment.ResultSuccess),
-	)
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	handler := NewHandler(service)
+			handler := newTestOrderHandler(
+				tt.transactions,
+				&fakeOrderProductRepository{},
+				tt.orders,
+				&fakePaymentService{},
+			)
 
-	request := httptest.NewRequest(
-		http.MethodPost,
-		"/api/v1/orders/999/cancel",
-		nil,
-	)
+			var req *http.Request
 
-	request.Header.Set("X-User-ID", "10")
-	recorder := httptest.NewRecorder()
+			if tt.authenticated {
+				req = authenticatedRequest(
+					t,
+					http.MethodGet,
+					"/api/v1/orders/"+tt.id,
+					nil,
+					tt.userID,
+					"user",
+				)
+			} else {
+				req = httptest.NewRequest(
+					http.MethodGet,
+					"/api/v1/orders/"+tt.id,
+					nil,
+				)
+			}
 
-	handler.CancelOrder(recorder, request)
+			setPathValue(req, "id", tt.id)
 
-	if recorder.Code != http.StatusNotFound {
-		t.Fatalf(
-			"expected status %d, got %d",
-			http.StatusNotFound,
-			recorder.Code,
-		)
-	}
+			var recorder *httptest.ResponseRecorder
 
-	var response errorResponse
+			if tt.authenticated {
+				recorder = serveAuthenticated(
+					t,
+					http.HandlerFunc(handler.GetOrder),
+					req,
+				)
+			} else {
+				recorder = httptest.NewRecorder()
+				handler.GetOrder(recorder, req)
+			}
 
-	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
-		t.Fatalf(
-			"failed to decode response: %v",
-			err,
-		)
-	}
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf(
+					"status = %d, want %d; body=%q",
+					recorder.Code,
+					tt.wantStatus,
+					recorder.Body.String(),
+				)
+			}
 
-	if response.Error != "order_not_found" {
-		t.Fatalf(
-			"expected order_not_found, got %s",
-			response.Error,
-		)
-	}
-}
+			if tt.wantError != "" {
+				response := decodeErrorResponse(t, recorder)
 
-func TestCancelOrderHandler_InvalidOrderState(t *testing.T) {
-	productRepository := &fakeProductRepository{}
+				if response.Error != tt.wantError {
+					t.Fatalf(
+						"error = %q, want %q",
+						response.Error,
+						tt.wantError,
+					)
+				}
 
-	orderRepository := &fakeOrderRepository{
-		order: Order{
-			ID:     100,
-			UserID: 10,
-			Status: "cancelled",
-		},
-	}
+				return
+			}
 
-	transactionManager := &fakeTransactionManager{}
+			if tt.wantOrder == nil {
+				return
+			}
 
-	service := NewService(
-		transactionManager,
-		productRepository,
-		orderRepository,
-		payment.NewFakeService(payment.ResultSuccess),
-	)
+			if recorder.Header().Get("Content-Type") != "application/json" {
+				t.Fatalf(
+					"Content-Type = %q, want application/json",
+					recorder.Header().Get("Content-Type"),
+				)
+			}
 
-	handler := NewHandler(service)
+			var response struct {
+				Order Order       `json:"order"`
+				Items []OrderItem `json:"items"`
+			}
 
-	request := httptest.NewRequest(
-		http.MethodPost,
-		"/api/v1/orders/100/cancel",
-		nil,
-	)
+			if err := json.Unmarshal(
+				recorder.Body.Bytes(),
+				&response,
+			); err != nil {
+				t.Fatalf("failed to decode response: %v", err)
+			}
 
-	request.Header.Set("X-User-ID", "10")
+			if response.Order != *tt.wantOrder {
+				t.Fatalf(
+					"order = %+v, want %+v",
+					response.Order,
+					*tt.wantOrder,
+				)
+			}
 
-	recorder := httptest.NewRecorder()
+			if len(response.Items) != len(tt.wantItems) {
+				t.Fatalf(
+					"items = %d, want %d",
+					len(response.Items),
+					len(tt.wantItems),
+				)
+			}
 
-	handler.CancelOrder(recorder, request)
-
-	if recorder.Code != http.StatusConflict {
-		t.Fatalf(
-			"expected status %d, got %d",
-			http.StatusConflict,
-			recorder.Code,
-		)
-	}
-
-	var response errorResponse
-
-	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
-		t.Fatalf(
-			"failed to decode response: %v",
-			err,
-		)
-	}
-
-	if response.Error != "invalid_order_state" {
-		t.Fatalf(
-			"expected invalid_order_state, got %s",
-			response.Error,
-		)
-	}
-}
-func TestPayOrderHandler_Success(t *testing.T) {
-	orderRepository := &cancelTestOrderRepository{
-		order: Order{
-			ID:          100,
-			UserID:      10,
-			Status:      "pending",
-			TotalAmount: 300000,
-			Currency:    "EUR",
-		},
-	}
-
-	paymentService := &mockPaymentService{
-		result: payment.ResultSuccess,
-	}
-
-	service := NewService(
-		&fakeTransactionManager{},
-		&cancelTestProductRepository{},
-		orderRepository,
-		paymentService,
-	)
-
-	handler := NewHandler(service)
-
-	req := httptest.NewRequest(
-		http.MethodPost,
-		"/api/v1/orders/100/pay",
-		nil,
-	)
-
-	req.Header.Set("X-User-ID", "10")
-
-	req.SetPathValue("id", "100")
-
-	rec := httptest.NewRecorder()
-
-	handler.PayOrder(rec, req)
-
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf(
-			"expected status 204, got %d",
-			rec.Code,
-		)
-	}
-
-	if !paymentService.called {
-		t.Fatal("payment service was not called")
-	}
-
-	if orderRepository.updatedStatus != "paid" {
-		t.Fatalf(
-			"expected status paid, got %s",
-			orderRepository.updatedStatus,
-		)
+			for i := range tt.wantItems {
+				if response.Items[i] != tt.wantItems[i] {
+					t.Fatalf(
+						"items[%d] = %+v, want %+v",
+						i,
+						response.Items[i],
+						tt.wantItems[i],
+					)
+				}
+			}
+		})
 	}
 }
 
-func TestPayOrderHandler_InvalidOrderID(t *testing.T) {
-	service := NewService(
-		&fakeTransactionManager{},
-		&cancelTestProductRepository{},
-		&cancelTestOrderRepository{},
-		&mockPaymentService{
-			result: payment.ResultSuccess,
+func TestHandler_PayOrder(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		id             string
+		userID         int64
+		orders         *fakeOrderRepository
+		transactions   *fakeOrderTransactionManager
+		paymentService *fakePaymentService
+		authenticated  bool
+		wantStatus     int
+		wantError      string
+		wantPaid       bool
+	}{
+		{
+			name:           "unauthorized",
+			id:             "10",
+			userID:         42,
+			orders:         &fakeOrderRepository{},
+			transactions:   &fakeOrderTransactionManager{},
+			paymentService: &fakePaymentService{},
+			authenticated:  false,
+			wantStatus:     http.StatusUnauthorized,
 		},
-	)
-
-	handler := NewHandler(service)
-
-	req := httptest.NewRequest(
-		http.MethodPost,
-		"/api/v1/orders/abc/pay",
-		nil,
-	)
-
-	req.SetPathValue("id", "abc")
-
-	rec := httptest.NewRecorder()
-
-	handler.PayOrder(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf(
-			"expected status 400, got %d",
-			rec.Code,
-		)
+		{
+			name:           "invalid id",
+			id:             "abc",
+			userID:         42,
+			orders:         &fakeOrderRepository{},
+			transactions:   &fakeOrderTransactionManager{},
+			paymentService: &fakePaymentService{},
+			authenticated:  true,
+			wantStatus:     http.StatusBadRequest,
+			wantError:      "invalid_order_id",
+		},
+		{
+			name: "not found",
+			id:   "10",
+			orders: &fakeOrderRepository{
+				getByIDForUpdateErr: ErrOrderNotFound,
+			},
+			transactions:   &fakeOrderTransactionManager{},
+			paymentService: &fakePaymentService{},
+			authenticated:  true,
+			userID:         42,
+			wantStatus:     http.StatusNotFound,
+			wantError:      "order_not_found",
+		},
+		{
+			name: "forbidden",
+			id:   "10",
+			orders: &fakeOrderRepository{
+				order: Order{
+					ID:     10,
+					UserID: 99,
+					Status: string(OrderStatusPending),
+				},
+			},
+			transactions:   &fakeOrderTransactionManager{},
+			paymentService: &fakePaymentService{},
+			authenticated:  true,
+			userID:         42,
+			wantStatus:     http.StatusForbidden,
+			wantError:      "order_forbidden",
+		},
+		{
+			name: "invalid state",
+			id:   "10",
+			orders: &fakeOrderRepository{
+				order: Order{
+					ID:     10,
+					UserID: 42,
+					Status: string(OrderStatusPaid),
+				},
+			},
+			transactions:   &fakeOrderTransactionManager{},
+			paymentService: &fakePaymentService{},
+			authenticated:  true,
+			userID:         42,
+			wantStatus:     http.StatusConflict,
+			wantError:      "invalid_order_state",
+		},
+		{
+			name: "payment failed",
+			id:   "10",
+			orders: &fakeOrderRepository{
+				order: Order{
+					ID:       10,
+					UserID:   42,
+					Status:   string(OrderStatusPending),
+					Currency: "USD",
+				},
+			},
+			transactions: &fakeOrderTransactionManager{},
+			paymentService: &fakePaymentService{
+				result: payment.ResultFailed,
+			},
+			authenticated: true,
+			userID:        42,
+			wantStatus:    http.StatusPaymentRequired,
+			wantError:     "payment_failed",
+		},
+		{
+			name: "payment timeout",
+			id:   "10",
+			orders: &fakeOrderRepository{
+				order: Order{
+					ID:       10,
+					UserID:   42,
+					Status:   string(OrderStatusPending),
+					Currency: "USD",
+				},
+			},
+			transactions: &fakeOrderTransactionManager{},
+			paymentService: &fakePaymentService{
+				result: payment.ResultTimeout,
+			},
+			authenticated: true,
+			userID:        42,
+			wantStatus:    http.StatusGatewayTimeout,
+			wantError:     "payment_timeout",
+		},
+		{
+			name: "payment service error",
+			id:   "10",
+			orders: &fakeOrderRepository{
+				order: Order{
+					ID:       10,
+					UserID:   42,
+					Status:   string(OrderStatusPending),
+					Currency: "USD",
+				},
+			},
+			transactions: &fakeOrderTransactionManager{},
+			paymentService: &fakePaymentService{
+				err: errors.New("payment unavailable"),
+			},
+			authenticated: true,
+			userID:        42,
+			wantStatus:    http.StatusInternalServerError,
+			wantError:     "internal_server_error",
+		},
+		{
+			name: "transaction error",
+			id:   "10",
+			orders: &fakeOrderRepository{
+				order: Order{
+					ID:          10,
+					UserID:      42,
+					Status:      string(OrderStatusPending),
+					TotalAmount: 1000,
+					Currency:    "USD",
+				},
+			},
+			transactions: &fakeOrderTransactionManager{
+				err: errors.New("transaction failed"),
+			},
+			paymentService: &fakePaymentService{
+				result: payment.ResultSuccess,
+			},
+			authenticated: true,
+			userID:        42,
+			wantStatus:    http.StatusInternalServerError,
+			wantError:     "internal_server_error",
+		},
+		{
+			name: "success",
+			id:   "10",
+			orders: &fakeOrderRepository{
+				order: Order{
+					ID:          10,
+					UserID:      42,
+					Status:      string(OrderStatusPending),
+					TotalAmount: 1000,
+					Currency:    "USD",
+				},
+			},
+			transactions: &fakeOrderTransactionManager{},
+			paymentService: &fakePaymentService{
+				result: payment.ResultSuccess,
+			},
+			authenticated: true,
+			userID:        42,
+			wantStatus:    http.StatusNoContent,
+			wantPaid:      true,
+		},
 	}
 
-	if !strings.Contains(rec.Body.String(), "invalid_order_id") {
-		t.Fatalf(
-			"expected invalid_order_id, got %s",
-			rec.Body.String(),
-		)
+	for _, tt := range tests {
+		tt := tt
+
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler := newTestOrderHandler(
+				tt.transactions,
+				&fakeOrderProductRepository{},
+				tt.orders,
+				tt.paymentService,
+			)
+
+			var req *http.Request
+
+			if tt.authenticated {
+				req = authenticatedRequest(
+					t,
+					http.MethodPost,
+					"/api/v1/orders/"+tt.id+"/pay",
+					nil,
+					tt.userID,
+					"user",
+				)
+				setPathValue(req, "id", tt.id)
+			} else {
+				req = httptest.NewRequest(
+					http.MethodPost,
+					"/api/v1/orders/"+tt.id+"/pay",
+					nil,
+				)
+				setPathValue(req, "id", tt.id)
+			}
+
+			var recorder *httptest.ResponseRecorder
+
+			if tt.authenticated {
+				recorder = serveAuthenticated(
+					t,
+					http.HandlerFunc(handler.PayOrder),
+					req,
+				)
+			} else {
+				recorder = httptest.NewRecorder()
+				handler.PayOrder(recorder, req)
+			}
+
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf(
+					"status = %d, want %d; body=%q",
+					recorder.Code,
+					tt.wantStatus,
+					recorder.Body.String(),
+				)
+			}
+
+			if tt.wantError != "" {
+				response := decodeErrorResponse(t, recorder)
+
+				if response.Error != tt.wantError {
+					t.Fatalf(
+						"error = %q, want %q",
+						response.Error,
+						tt.wantError,
+					)
+				}
+			}
+
+			if tt.wantPaid {
+				if tt.orders.updatedStatus != string(OrderStatusPaid) {
+					t.Fatalf(
+						"status = %q, want paid",
+						tt.orders.updatedStatus,
+					)
+				}
+
+				if tt.paymentService.orderID != 10 {
+					t.Fatalf(
+						"payment order ID = %d, want 10",
+						tt.paymentService.orderID,
+					)
+				}
+
+				if tt.paymentService.amount != 1000 {
+					t.Fatalf(
+						"payment amount = %d, want 1000",
+						tt.paymentService.amount,
+					)
+				}
+
+				if tt.paymentService.currency != "USD" {
+					t.Fatalf(
+						"payment currency = %q, want USD",
+						tt.paymentService.currency,
+					)
+				}
+			}
+		})
 	}
 }
 
-func TestPayOrderHandler_InvalidState(t *testing.T) {
-	orderRepository := &cancelTestOrderRepository{
-		order: Order{
-			ID:     100,
-			UserID: 10,
-			Status: "cancelled",
+func TestHandler_ListOrders(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		orders     *fakeOrderRepository
+		wantStatus int
+		wantOrders []Order
+		wantError  string
+	}{
+		{
+			name: "success",
+			orders: &fakeOrderRepository{
+				orders: []Order{
+					{
+						ID:     3,
+						UserID: 3,
+					},
+					{
+						ID:     2,
+						UserID: 2,
+					},
+				},
+			},
+			wantStatus: http.StatusOK,
+			wantOrders: []Order{
+				{
+					ID:     3,
+					UserID: 3,
+				},
+				{
+					ID:     2,
+					UserID: 2,
+				},
+			},
+		},
+		{
+			name: "empty list",
+			orders: &fakeOrderRepository{
+				orders: []Order{},
+			},
+			wantStatus: http.StatusOK,
+			wantOrders: []Order{},
+		},
+		{
+			name: "internal error",
+			orders: &fakeOrderRepository{
+				listErr: errors.New("database unavailable"),
+			},
+			wantStatus: http.StatusInternalServerError,
+			wantError:  "internal_server_error",
 		},
 	}
 
-	paymentService := &mockPaymentService{
-		result: payment.ResultSuccess,
-	}
+	for _, tt := range tests {
+		tt := tt
 
-	service := NewService(
-		&fakeTransactionManager{},
-		&cancelTestProductRepository{},
-		orderRepository,
-		paymentService,
-	)
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	handler := NewHandler(service)
+			handler := newTestOrderHandler(
+				&fakeOrderTransactionManager{},
+				&fakeOrderProductRepository{},
+				tt.orders,
+				&fakePaymentService{},
+			)
 
-	req := httptest.NewRequest(
-		http.MethodPost,
-		"/api/v1/orders/100/pay",
-		nil,
-	)
+			req := httptest.NewRequest(
+				http.MethodGet,
+				"/api/v1/orders",
+				nil,
+			)
 
-	req.Header.Set("X-User-ID", "10")
+			recorder := httptest.NewRecorder()
 
-	req.SetPathValue("id", "100")
+			handler.ListOrders(recorder, req)
 
-	rec := httptest.NewRecorder()
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf(
+					"status = %d, want %d",
+					recorder.Code,
+					tt.wantStatus,
+				)
+			}
 
-	handler.PayOrder(rec, req)
+			if tt.wantError != "" {
+				response := decodeErrorResponse(t, recorder)
 
-	if rec.Code != http.StatusConflict {
-		t.Fatalf(
-			"expected status 409, got %d",
-			rec.Code,
-		)
-	}
+				if response.Error != tt.wantError {
+					t.Fatalf(
+						"error = %q, want %q",
+						response.Error,
+						tt.wantError,
+					)
+				}
 
-	if paymentService.called {
-		t.Fatal("payment service must not be called")
+				return
+			}
+
+			if recorder.Header().Get("Content-Type") != "application/json" {
+				t.Fatalf(
+					"Content-Type = %q, want application/json",
+					recorder.Header().Get("Content-Type"),
+				)
+			}
+
+			var response struct {
+				Orders []Order `json:"orders"`
+			}
+
+			if err := json.Unmarshal(
+				recorder.Body.Bytes(),
+				&response,
+			); err != nil {
+				t.Fatalf("failed to decode response: %v", err)
+			}
+
+			if response.Orders == nil {
+				t.Fatal("orders is nil, want empty/non-nil slice")
+			}
+
+			if len(response.Orders) != len(tt.wantOrders) {
+				t.Fatalf(
+					"orders = %d, want %d",
+					len(response.Orders),
+					len(tt.wantOrders),
+				)
+			}
+
+			for i := range tt.wantOrders {
+				if response.Orders[i] != tt.wantOrders[i] {
+					t.Fatalf(
+						"orders[%d] = %+v, want %+v",
+						i,
+						response.Orders[i],
+						tt.wantOrders[i],
+					)
+				}
+			}
+		})
 	}
 }
 
-func TestPayOrderHandler_PaymentFailed(t *testing.T) {
-	orderRepository := &cancelTestOrderRepository{
-		order: Order{
-			ID:     100,
-			UserID: 10,
-			Status: "pending",
+func TestHandler_UpdateOrderStatus(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		id            string
+		requestStatus string
+		userID        int64
+		role          string
+		orders        *fakeOrderRepository
+		transactions  *fakeOrderTransactionManager
+		authenticated bool
+		wantStatus    int
+		wantError     string
+		wantUpdated   string
+	}{
+		{
+			name:          "invalid id",
+			id:            "abc",
+			requestStatus: string(OrderStatusPaid),
+			userID:        42,
+			role:          "admin",
+			orders:        &fakeOrderRepository{},
+			transactions:  &fakeOrderTransactionManager{},
+			authenticated: true,
+			wantStatus:    http.StatusBadRequest,
+			wantError:     "invalid_order_id",
+		},
+		{
+			name:          "invalid body",
+			id:            "10",
+			requestStatus: "",
+			userID:        42,
+			role:          "admin",
+			orders:        &fakeOrderRepository{},
+			transactions:  &fakeOrderTransactionManager{},
+			authenticated: true,
+			wantStatus:    http.StatusBadRequest,
+			wantError:     "invalid_request_body",
+		},
+		{
+			name:          "invalid state",
+			id:            "10",
+			requestStatus: "unknown",
+			userID:        42,
+			role:          "admin",
+			orders: &fakeOrderRepository{
+				order: Order{
+					ID:     10,
+					Status: string(OrderStatusPending),
+				},
+			},
+			transactions:  &fakeOrderTransactionManager{},
+			authenticated: true,
+			wantStatus:    http.StatusConflict,
+			wantError:     "invalid_order_state",
+		},
+		{
+			name:          "not found",
+			id:            "10",
+			requestStatus: string(OrderStatusPaid),
+			userID:        42,
+			role:          "admin",
+			orders: &fakeOrderRepository{
+				getByIDForUpdateErr: ErrOrderNotFound,
+			},
+			transactions:  &fakeOrderTransactionManager{},
+			authenticated: true,
+			wantStatus:    http.StatusNotFound,
+			wantError:     "order_not_found",
+		},
+		{
+			name:          "invalid transition",
+			id:            "10",
+			requestStatus: string(OrderStatusProcessing),
+			userID:        42,
+			role:          "admin",
+			orders: &fakeOrderRepository{
+				order: Order{
+					ID:     10,
+					Status: string(OrderStatusPending),
+				},
+			},
+			transactions:  &fakeOrderTransactionManager{},
+			authenticated: true,
+			wantStatus:    http.StatusConflict,
+			wantError:     "invalid_order_state",
+		},
+		{
+			name:          "repository error",
+			id:            "10",
+			requestStatus: string(OrderStatusPaid),
+			userID:        42,
+			role:          "admin",
+			orders: &fakeOrderRepository{
+				order: Order{
+					ID:     10,
+					Status: string(OrderStatusPending),
+				},
+				updateStatusErr: errors.New("database error"),
+			},
+			transactions:  &fakeOrderTransactionManager{},
+			authenticated: true,
+			wantStatus:    http.StatusInternalServerError,
+			wantError:     "internal_server_error",
+		},
+		{
+			name:          "transaction error",
+			id:            "10",
+			requestStatus: string(OrderStatusPaid),
+			userID:        42,
+			role:          "admin",
+			orders:        &fakeOrderRepository{},
+			transactions: &fakeOrderTransactionManager{
+				err: errors.New("transaction failed"),
+			},
+			authenticated: true,
+			wantStatus:    http.StatusInternalServerError,
+			wantError:     "internal_server_error",
+		},
+		{
+			name:          "success paid",
+			id:            "10",
+			requestStatus: string(OrderStatusPaid),
+			userID:        42,
+			role:          "admin",
+			orders: &fakeOrderRepository{
+				order: Order{
+					ID:     10,
+					Status: string(OrderStatusPending),
+				},
+			},
+			transactions:  &fakeOrderTransactionManager{},
+			authenticated: true,
+			wantStatus:    http.StatusNoContent,
+			wantUpdated:   string(OrderStatusPaid),
+		},
+		{
+			name:          "success cancelled",
+			id:            "10",
+			requestStatus: string(OrderStatusCancelled),
+			userID:        42,
+			role:          "admin",
+			orders: &fakeOrderRepository{
+				order: Order{
+					ID:     10,
+					Status: string(OrderStatusPending),
+				},
+			},
+			transactions:  &fakeOrderTransactionManager{},
+			authenticated: true,
+			wantStatus:    http.StatusNoContent,
+			wantUpdated:   string(OrderStatusCancelled),
 		},
 	}
 
-	paymentService := &mockPaymentService{
-		result: payment.ResultFailed,
-	}
+	for _, tt := range tests {
+		tt := tt
 
-	service := NewService(
-		&fakeTransactionManager{},
-		&cancelTestProductRepository{},
-		orderRepository,
-		paymentService,
-	)
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	handler := NewHandler(service)
+			handler := newTestOrderHandler(
+				tt.transactions,
+				&fakeOrderProductRepository{},
+				tt.orders,
+				&fakePaymentService{},
+			)
 
-	req := httptest.NewRequest(
-		http.MethodPost,
-		"/api/v1/orders/100/pay",
-		nil,
-	)
-	req.Header.Set("X-User-ID", "10")
+			var body []byte
 
-	req.SetPathValue("id", "100")
+			if tt.name == "invalid body" {
+				body = []byte(`{"status":`)
+			} else {
+				body, _ = json.Marshal(
+					UpdateOrderStatusRequest{
+						Status: tt.requestStatus,
+					},
+				)
+			}
 
-	rec := httptest.NewRecorder()
+			req := authenticatedRequest(
+				t,
+				http.MethodPatch,
+				"/api/v1/orders/"+tt.id+"/status",
+				body,
+				tt.userID,
+				tt.role,
+			)
 
-	handler.PayOrder(rec, req)
+			setPathValue(req, "id", tt.id)
 
-	if rec.Code != http.StatusPaymentRequired {
-		t.Fatalf(
-			"expected status 402, got %d",
-			rec.Code,
-		)
-	}
+			var recorder *httptest.ResponseRecorder
 
-	if !strings.Contains(rec.Body.String(), "payment_failed") {
-		t.Fatalf(
-			"expected payment_failed, got %s",
-			rec.Body.String(),
-		)
+			if tt.authenticated {
+				recorder = serveAuthenticated(
+					t,
+					http.HandlerFunc(handler.UpdateOrderStatus),
+					req,
+				)
+			} else {
+				recorder = httptest.NewRecorder()
+				handler.UpdateOrderStatus(recorder, req)
+			}
+
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf(
+					"status = %d, want %d; body=%q",
+					recorder.Code,
+					tt.wantStatus,
+					recorder.Body.String(),
+				)
+			}
+
+			if tt.wantError != "" {
+				response := decodeErrorResponse(t, recorder)
+
+				if response.Error != tt.wantError {
+					t.Fatalf(
+						"error = %q, want %q",
+						response.Error,
+						tt.wantError,
+					)
+				}
+
+				return
+			}
+
+			if recorder.Body.Len() != 0 {
+				t.Fatalf(
+					"body = %q, want empty",
+					recorder.Body.String(),
+				)
+			}
+
+			if tt.wantUpdated != "" {
+				if tt.orders.updatedOrderID != 10 {
+					t.Fatalf(
+						"order ID = %d, want 10",
+						tt.orders.updatedOrderID,
+					)
+				}
+
+				if tt.orders.updatedStatus != tt.wantUpdated {
+					t.Fatalf(
+						"status = %q, want %q",
+						tt.orders.updatedStatus,
+						tt.wantUpdated,
+					)
+				}
+			}
+		})
 	}
 }
 
-func TestPayOrderHandler_PaymentTimeout(t *testing.T) {
-	orderRepository := &cancelTestOrderRepository{
-		order: Order{
-			ID:     100,
-			UserID: 10,
-			Status: "pending",
+func TestHandler_AuthMiddleware(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		authorization string
+		userID        int64
+		role          string
+		wantStatus    int
+		wantUserID    int64
+		wantRole      string
+	}{
+		{
+			name:          "invalid token",
+			authorization: "Bearer invalid-token",
+			wantStatus:    http.StatusUnauthorized,
+		},
+		{
+			name:       "valid token preserves claims",
+			userID:     123,
+			role:       "admin",
+			wantStatus: http.StatusNoContent,
+			wantUserID: 123,
+			wantRole:   "admin",
 		},
 	}
 
-	paymentService := &mockPaymentService{
-		result: payment.ResultTimeout,
+	for _, tt := range tests {
+		tt := tt
+
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var gotUserID int64
+			var gotRole string
+
+			next := http.HandlerFunc(func(
+				w http.ResponseWriter,
+				r *http.Request,
+			) {
+				claims, ok := auth.ClaimsFromContext(
+					r.Context(),
+				)
+
+				if !ok {
+					t.Fatal("claims are missing from context")
+				}
+
+				gotUserID = claims.UserID
+				gotRole = claims.Role
+
+				w.WriteHeader(http.StatusNoContent)
+			})
+
+			req := httptest.NewRequest(
+				http.MethodGet,
+				"/",
+				nil,
+			)
+
+			if tt.authorization != "" {
+				req.Header.Set(
+					"Authorization",
+					tt.authorization,
+				)
+			} else {
+				token, err := auth.NewJWTManager(
+					testJWTSecret,
+				).GenerateToken(
+					tt.userID,
+					tt.role,
+				)
+				if err != nil {
+					t.Fatalf(
+						"failed to generate token: %v",
+						err,
+					)
+				}
+
+				req.Header.Set(
+					"Authorization",
+					"Bearer "+token,
+				)
+			}
+
+			recorder := httptest.NewRecorder()
+
+			auth.NewJWTManager(testJWTSecret).
+				Middleware(next).
+				ServeHTTP(recorder, req)
+
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf(
+					"status = %d, want %d",
+					recorder.Code,
+					tt.wantStatus,
+				)
+			}
+
+			if tt.wantStatus == http.StatusNoContent {
+				if gotUserID != tt.wantUserID {
+					t.Fatalf(
+						"user ID = %d, want %d",
+						gotUserID,
+						tt.wantUserID,
+					)
+				}
+
+				if gotRole != tt.wantRole {
+					t.Fatalf(
+						"role = %q, want %q",
+						gotRole,
+						tt.wantRole,
+					)
+				}
+			}
+		})
+	}
+}
+
+func TestHandler_ContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		cancel       bool
+		wantStatuses []int
+	}{
+		{
+			name:         "cancelled context",
+			cancel:       true,
+			wantStatuses: []int{http.StatusCreated, http.StatusInternalServerError},
+		},
+		{
+			name:         "active context",
+			cancel:       false,
+			wantStatuses: []int{http.StatusCreated},
+		},
 	}
 
-	service := NewService(
-		&fakeTransactionManager{},
-		&cancelTestProductRepository{},
-		orderRepository,
-		paymentService,
-	)
+	for _, tt := range tests {
+		tt := tt
 
-	handler := NewHandler(service)
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	req := httptest.NewRequest(
-		http.MethodPost,
-		"/api/v1/orders/100/pay",
-		nil,
-	)
+			handler := newTestOrderHandler(
+				&fakeOrderTransactionManager{},
+				&fakeOrderProductRepository{
+					products: map[int64]product.Product{
+						1: {
+							ID:       1,
+							Price:    100,
+							Currency: "USD",
+							Stock:    10,
+						},
+					},
+				},
+				&fakeOrderRepository{},
+				&fakePaymentService{},
+			)
 
-	req.Header.Set("X-User-ID", "10")
+			ctx, cancel := context.WithCancel(
+				context.Background(),
+			)
 
-	req.SetPathValue("id", "100")
+			if tt.cancel {
+				cancel()
+			} else {
+				defer cancel()
+			}
 
-	rec := httptest.NewRecorder()
+			req := httptest.NewRequest(
+				http.MethodPost,
+				"/api/v1/orders",
+				bytes.NewBufferString(
+					`{"items":[{"product_id":1,"quantity":1}]}`,
+				),
+			).WithContext(ctx)
 
-	handler.PayOrder(rec, req)
+			token, err := auth.NewJWTManager(
+				testJWTSecret,
+			).GenerateToken(42, "user")
+			if err != nil {
+				t.Fatalf(
+					"failed to generate token: %v",
+					err,
+				)
+			}
 
-	if rec.Code != http.StatusGatewayTimeout {
-		t.Fatalf(
-			"expected status 504, got %d",
-			rec.Code,
-		)
-	}
+			req.Header.Set(
+				"Authorization",
+				"Bearer "+token,
+			)
 
-	if !strings.Contains(rec.Body.String(), "payment_timeout") {
-		t.Fatalf(
-			"expected payment_timeout, got %s",
-			rec.Body.String(),
-		)
+			recorder := httptest.NewRecorder()
+
+			auth.NewJWTManager(testJWTSecret).
+				Middleware(
+					http.HandlerFunc(handler.CreateOrder),
+				).
+				ServeHTTP(recorder, req)
+
+			validStatus := false
+
+			for _, status := range tt.wantStatuses {
+				if recorder.Code == status {
+					validStatus = true
+					break
+				}
+			}
+
+			if !validStatus {
+				t.Fatalf(
+					"unexpected status = %d, want one of %v",
+					recorder.Code,
+					tt.wantStatuses,
+				)
+			}
+		})
 	}
 }

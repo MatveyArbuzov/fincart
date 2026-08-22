@@ -2,127 +2,117 @@ package order
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"regexp"
 	"testing"
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+
+	"github.com/MatveyArbuzov/fincart/internal/database"
 )
 
-func TestPostgresRepository_Create(t *testing.T) {
+func newMockTx(t *testing.T) (sqlmock.Sqlmock, *sql.Tx) {
+	t.Helper()
+
 	db, mock, err := sqlmock.New()
 	if err != nil {
-		t.Fatalf("failed to create sqlmock: %v", err)
+		t.Fatalf("sqlmock.New() error = %v", err)
 	}
-	defer db.Close()
 
-	repository := NewPostgresRepository()
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
 
 	mock.ExpectBegin()
 
-	createdAt := time.Now()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("db.Begin() error = %v", err)
+	}
 
-	mock.ExpectQuery(regexp.QuoteMeta(`
-		INSERT INTO orders (
-			user_id,
-			status,
-			total_amount,
-			currency
-		)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id, created_at
-	`)).
-		WithArgs(
-			int64(10),
-			"pending",
-			int64(300000),
-			"EUR",
-		).
-		WillReturnRows(
-			sqlmock.NewRows([]string{
+	t.Cleanup(func() {
+		_ = tx.Rollback()
+	})
+
+	return mock, tx
+}
+
+func TestPostgresRepository_Create(t *testing.T) {
+	t.Parallel()
+
+	createdAt := time.Date(
+		2026,
+		time.August,
+		22,
+		12,
+		0,
+		0,
+		0,
+		time.UTC,
+	)
+
+	tests := []struct {
+		name    string
+		order   Order
+		rows    *sqlmock.Rows
+		want    Order
+		wantErr bool
+	}{
+		{
+			name: "success",
+			order: Order{
+				UserID:      42,
+				Status:      string(OrderStatusPending),
+				TotalAmount: 1500,
+				Currency:    "EUR",
+			},
+			rows: sqlmock.NewRows([]string{
 				"id",
 				"created_at",
 			}).AddRow(
 				int64(100),
 				createdAt,
 			),
-		)
-	mock.ExpectRollback()
-	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("failed to begin transaction: %v", err)
-	}
-
-	result, err := repository.Create(
-		context.Background(),
-		tx,
-		Order{
-			UserID:      10,
-			Status:      "pending",
-			TotalAmount: 300000,
-			Currency:    "EUR",
+			want: Order{
+				ID:          100,
+				UserID:      42,
+				Status:      string(OrderStatusPending),
+				TotalAmount: 1500,
+				Currency:    "EUR",
+				CreatedAt:   createdAt,
+			},
 		},
-	)
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		{
+			name: "scan error",
+			order: Order{
+				UserID:      42,
+				Status:      string(OrderStatusPending),
+				TotalAmount: 1500,
+				Currency:    "EUR",
+			},
+			rows: sqlmock.NewRows([]string{
+				"id",
+				"created_at",
+			}).AddRow(
+				"invalid-id",
+				createdAt,
+			),
+			want:    Order{},
+			wantErr: true,
+		},
 	}
 
-	if result.ID != 100 {
-		t.Fatalf("expected ID 100, got %d", result.ID)
-	}
+	for _, tt := range tests {
+		tt := tt
 
-	if result.UserID != 10 {
-		t.Fatalf("expected user ID 10, got %d", result.UserID)
-	}
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	if result.Status != "pending" {
-		t.Fatalf("expected status pending, got %s", result.Status)
-	}
+			mock, tx := newMockTx(t)
 
-	if result.TotalAmount != 300000 {
-		t.Fatalf(
-			"expected total amount 300000, got %d",
-			result.TotalAmount,
-		)
-	}
-
-	if result.Currency != "EUR" {
-		t.Fatalf("expected currency EUR, got %s", result.Currency)
-	}
-
-	if !result.CreatedAt.Equal(createdAt) {
-		t.Fatalf(
-			"expected created_at %v, got %v",
-			createdAt,
-			result.CreatedAt,
-		)
-	}
-
-	if err := tx.Rollback(); err != nil {
-		t.Fatalf("failed to rollback test transaction: %v", err)
-	}
-
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet SQL expectations: %v", err)
-	}
-}
-
-func TestPostgresRepository_Create_Error(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("failed to create sqlmock: %v", err)
-	}
-	defer db.Close()
-
-	repository := NewPostgresRepository()
-
-	expectedErr := errors.New("insert order failed")
-
-	mock.ExpectBegin()
-
-	mock.ExpectQuery(regexp.QuoteMeta(`
+			const query = `
 		INSERT INTO orders (
 			user_id,
 			status,
@@ -131,61 +121,96 @@ func TestPostgresRepository_Create_Error(t *testing.T) {
 		)
 		VALUES ($1, $2, $3, $4)
 		RETURNING id, created_at
-	`)).
-		WithArgs(
-			int64(10),
-			"pending",
-			int64(300000),
-			"EUR",
-		).
-		WillReturnError(expectedErr)
+	`
 
-	mock.ExpectRollback()
-	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("failed to begin transaction: %v", err)
-	}
+			mock.ExpectQuery(regexp.QuoteMeta(query)).
+				WithArgs(
+					tt.order.UserID,
+					tt.order.Status,
+					tt.order.TotalAmount,
+					tt.order.Currency,
+				).
+				WillReturnRows(tt.rows)
 
-	_, err = repository.Create(
-		context.Background(),
-		tx,
-		Order{
-			UserID:      10,
-			Status:      "pending",
-			TotalAmount: 300000,
-			Currency:    "EUR",
-		},
-	)
+			repo := NewPostgresRepository()
 
-	if !errors.Is(err, expectedErr) {
-		t.Fatalf(
-			"expected %v, got %v",
-			expectedErr,
-			err,
-		)
-	}
+			got, err := repo.Create(
+				context.Background(),
+				tx,
+				tt.order,
+			)
 
-	if err := tx.Rollback(); err != nil {
-		t.Fatalf("failed to rollback test transaction: %v", err)
-	}
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("Create() error = nil, want error")
+				}
+			} else if err != nil {
+				t.Fatalf("Create() error = %v", err)
+			}
 
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet SQL expectations: %v", err)
+			if got != tt.want {
+				t.Errorf("Create() = %+v, want %+v", got, tt.want)
+			}
+
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("ExpectationsWereMet() error = %v", err)
+			}
+		})
 	}
 }
 
 func TestPostgresRepository_CreateItem(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("failed to create sqlmock: %v", err)
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		item    OrderItem
+		rows    *sqlmock.Rows
+		want    OrderItem
+		wantErr bool
+	}{
+		{
+			name: "success",
+			item: OrderItem{
+				OrderID:   100,
+				ProductID: 10,
+				Quantity:  3,
+				UnitPrice: 500,
+			},
+			rows: sqlmock.NewRows([]string{"id"}).
+				AddRow(int64(200)),
+			want: OrderItem{
+				ID:        200,
+				OrderID:   100,
+				ProductID: 10,
+				Quantity:  3,
+				UnitPrice: 500,
+			},
+		},
+		{
+			name: "scan error",
+			item: OrderItem{
+				OrderID:   100,
+				ProductID: 10,
+				Quantity:  3,
+				UnitPrice: 500,
+			},
+			rows: sqlmock.NewRows([]string{"id"}).
+				AddRow("invalid-id"),
+			want:    OrderItem{},
+			wantErr: true,
+		},
 	}
-	defer db.Close()
 
-	repository := NewPostgresRepository()
+	for _, tt := range tests {
+		tt := tt
 
-	mock.ExpectBegin()
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	mock.ExpectQuery(regexp.QuoteMeta(`
+			mock, tx := newMockTx(t)
+
+			const query = `
 		INSERT INTO order_items (
 			order_id,
 			product_id,
@@ -194,164 +219,70 @@ func TestPostgresRepository_CreateItem(t *testing.T) {
 		)
 		VALUES ($1, $2, $3, $4)
 		RETURNING id
-	`)).
-		WithArgs(
-			int64(100),
-			int64(1),
-			2,
-			int64(150000),
-		).
-		WillReturnRows(
-			sqlmock.NewRows([]string{"id"}).
-				AddRow(int64(500)),
-		)
+	`
 
-	mock.ExpectRollback()
-	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("failed to begin transaction: %v", err)
-	}
+			mock.ExpectQuery(regexp.QuoteMeta(query)).
+				WithArgs(
+					tt.item.OrderID,
+					tt.item.ProductID,
+					tt.item.Quantity,
+					tt.item.UnitPrice,
+				).
+				WillReturnRows(tt.rows)
 
-	result, err := repository.CreateItem(
-		context.Background(),
-		tx,
-		OrderItem{
-			OrderID:   100,
-			ProductID: 1,
-			Quantity:  2,
-			UnitPrice: 150000,
-		},
-	)
+			repo := NewPostgresRepository()
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+			got, err := repo.CreateItem(
+				context.Background(),
+				tx,
+				tt.item,
+			)
 
-	if result.ID != 500 {
-		t.Fatalf("expected item ID 500, got %d", result.ID)
-	}
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("CreateItem() error = nil, want error")
+				}
+			} else if err != nil {
+				t.Fatalf("CreateItem() error = %v", err)
+			}
 
-	if result.OrderID != 100 {
-		t.Fatalf("expected order ID 100, got %d", result.OrderID)
-	}
+			if got != tt.want {
+				t.Errorf("CreateItem() = %+v, want %+v", got, tt.want)
+			}
 
-	if result.ProductID != 1 {
-		t.Fatalf("expected product ID 1, got %d", result.ProductID)
-	}
-
-	if result.Quantity != 2 {
-		t.Fatalf("expected quantity 2, got %d", result.Quantity)
-	}
-
-	if result.UnitPrice != 150000 {
-		t.Fatalf(
-			"expected unit price 150000, got %d",
-			result.UnitPrice,
-		)
-	}
-
-	if err := tx.Rollback(); err != nil {
-		t.Fatalf("failed to rollback test transaction: %v", err)
-	}
-
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet SQL expectations: %v", err)
-	}
-}
-
-func TestPostgresRepository_CreateItem_Error(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("failed to create sqlmock: %v", err)
-	}
-	defer db.Close()
-
-	repository := NewPostgresRepository()
-
-	expectedErr := errors.New("insert order item failed")
-
-	mock.ExpectBegin()
-
-	mock.ExpectQuery(regexp.QuoteMeta(`
-		INSERT INTO order_items (
-			order_id,
-			product_id,
-			quantity,
-			unit_price
-		)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id
-	`)).
-		WithArgs(
-			int64(100),
-			int64(1),
-			2,
-			int64(150000),
-		).
-		WillReturnError(expectedErr)
-
-	mock.ExpectRollback()
-	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("failed to begin transaction: %v", err)
-	}
-
-	_, err = repository.CreateItem(
-		context.Background(),
-		tx,
-		OrderItem{
-			OrderID:   100,
-			ProductID: 1,
-			Quantity:  2,
-			UnitPrice: 150000,
-		},
-	)
-
-	if !errors.Is(err, expectedErr) {
-		t.Fatalf(
-			"expected %v, got %v",
-			expectedErr,
-			err,
-		)
-	}
-
-	if err := tx.Rollback(); err != nil {
-		t.Fatalf("failed to rollback test transaction: %v", err)
-	}
-
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet SQL expectations: %v", err)
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("ExpectationsWereMet() error = %v", err)
+			}
+		})
 	}
 }
 
 func TestPostgresRepository_GetByIDForUpdate(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("failed to create sqlmock: %v", err)
-	}
-	defer db.Close()
+	t.Parallel()
 
-	repository := NewPostgresRepository()
+	createdAt := time.Date(
+		2026,
+		time.August,
+		22,
+		12,
+		0,
+		0,
+		0,
+		time.UTC,
+	)
 
-	createdAt := time.Now()
-
-	mock.ExpectBegin()
-
-	mock.ExpectQuery(regexp.QuoteMeta(`
-		SELECT
-			id,
-			user_id,
-			status,
-			total_amount,
-			currency,
-			created_at
-		FROM orders
-		WHERE id = $1
-		FOR UPDATE
-	`)).
-		WithArgs(int64(100)).
-		WillReturnRows(
-			sqlmock.NewRows([]string{
+	tests := []struct {
+		name    string
+		id      int64
+		rows    *sqlmock.Rows
+		dbErr   error
+		want    Order
+		wantErr error
+	}{
+		{
+			name: "success",
+			id:   100,
+			rows: sqlmock.NewRows([]string{
 				"id",
 				"user_id",
 				"status",
@@ -360,82 +291,72 @@ func TestPostgresRepository_GetByIDForUpdate(t *testing.T) {
 				"created_at",
 			}).AddRow(
 				int64(100),
-				int64(10),
-				"pending",
-				int64(300000),
+				int64(42),
+				string(OrderStatusPending),
+				int64(1500),
 				"EUR",
 				createdAt,
 			),
-		)
-
-	mock.ExpectRollback()
-	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("failed to begin transaction: %v", err)
+			want: Order{
+				ID:          100,
+				UserID:      42,
+				Status:      string(OrderStatusPending),
+				TotalAmount: 1500,
+				Currency:    "EUR",
+				CreatedAt:   createdAt,
+			},
+		},
+		{
+			name: "not found",
+			id:   999,
+			rows: sqlmock.NewRows([]string{
+				"id",
+				"user_id",
+				"status",
+				"total_amount",
+				"currency",
+				"created_at",
+			}),
+			want:    Order{},
+			wantErr: ErrOrderNotFound,
+		},
+		{
+			name:  "database error",
+			id:    100,
+			dbErr: errors.New("database unavailable"),
+			want:  Order{},
+		},
+		{
+			name: "scan error",
+			id:   100,
+			rows: sqlmock.NewRows([]string{
+				"id",
+				"user_id",
+				"status",
+				"total_amount",
+				"currency",
+				"created_at",
+			}).AddRow(
+				"invalid-id",
+				42,
+				string(OrderStatusPending),
+				1500,
+				"EUR",
+				createdAt,
+			),
+			want: Order{},
+		},
 	}
 
-	result, err := repository.GetByIDForUpdate(
-		context.Background(),
-		tx,
-		100,
-	)
+	for _, tt := range tests {
+		tt := tt
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	if result.ID != 100 {
-		t.Fatalf("expected ID 100, got %d", result.ID)
-	}
+			mock, tx := newMockTx(t)
 
-	if result.UserID != 10 {
-		t.Fatalf("expected user ID 10, got %d", result.UserID)
-	}
-
-	if result.Status != "pending" {
-		t.Fatalf("expected status pending, got %s", result.Status)
-	}
-
-	if result.TotalAmount != 300000 {
-		t.Fatalf(
-			"expected total amount 300000, got %d",
-			result.TotalAmount,
-		)
-	}
-
-	if result.Currency != "EUR" {
-		t.Fatalf("expected EUR, got %s", result.Currency)
-	}
-
-	if !result.CreatedAt.Equal(createdAt) {
-		t.Fatalf(
-			"expected created_at %v, got %v",
-			createdAt,
-			result.CreatedAt,
-		)
-	}
-
-	if err := tx.Rollback(); err != nil {
-		t.Fatalf("failed to rollback test transaction: %v", err)
-	}
-
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet SQL expectations: %v", err)
-	}
-}
-
-func TestPostgresRepository_GetByIDForUpdate_NotFound(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("failed to create sqlmock: %v", err)
-	}
-	defer db.Close()
-
-	repository := NewPostgresRepository()
-
-	mock.ExpectBegin()
-
-	mock.ExpectQuery(regexp.QuoteMeta(`
+			const query = `
 		SELECT
 			id,
 			user_id,
@@ -446,164 +367,162 @@ func TestPostgresRepository_GetByIDForUpdate_NotFound(t *testing.T) {
 		FROM orders
 		WHERE id = $1
 		FOR UPDATE
-	`)).
-		WithArgs(int64(999)).
-		WillReturnError(errors.New("sql: no rows in result set"))
+	`
 
-	mock.ExpectRollback()
-	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("failed to begin transaction: %v", err)
-	}
+			expect := mock.ExpectQuery(regexp.QuoteMeta(query)).
+				WithArgs(tt.id)
 
-	_, err = repository.GetByIDForUpdate(
-		context.Background(),
-		tx,
-		999,
-	)
+			switch {
+			case tt.dbErr != nil:
+				expect.WillReturnError(tt.dbErr)
+			default:
+				expect.WillReturnRows(tt.rows)
+			}
 
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
+			repo := NewPostgresRepository()
 
-	if err := tx.Rollback(); err != nil {
-		t.Fatalf("failed to rollback test transaction: %v", err)
-	}
+			got, err := repo.GetByIDForUpdate(
+				context.Background(),
+				tx,
+				tt.id,
+			)
 
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet SQL expectations: %v", err)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf(
+						"GetByIDForUpdate() error = %v, want %v",
+						err,
+						tt.wantErr,
+					)
+				}
+			} else if tt.dbErr != nil {
+				if err == nil {
+					t.Fatal("GetByIDForUpdate() error = nil, want error")
+				}
+			} else if tt.name == "scan error" {
+				if err == nil {
+					t.Fatal("GetByIDForUpdate() error = nil, want error")
+				}
+			} else if err != nil {
+				t.Fatalf("GetByIDForUpdate() error = %v", err)
+			}
+
+			if got != tt.want {
+				t.Errorf(
+					"GetByIDForUpdate() = %+v, want %+v",
+					got,
+					tt.want,
+				)
+			}
+
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("ExpectationsWereMet() error = %v", err)
+			}
+		})
 	}
 }
 
 func TestPostgresRepository_GetItems(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("failed to create sqlmock: %v", err)
-	}
-	defer db.Close()
+	t.Parallel()
 
-	repository := NewPostgresRepository()
-
-	mock.ExpectBegin()
-
-	mock.ExpectQuery(regexp.QuoteMeta(`
-		SELECT
-			id,
-			order_id,
-			product_id,
-			quantity,
-			unit_price
-		FROM order_items
-		WHERE order_id = $1
-		ORDER BY id
-	`)).
-		WithArgs(int64(100)).
-		WillReturnRows(
-			sqlmock.NewRows([]string{
+	tests := []struct {
+		name     string
+		orderID  int64
+		rows     *sqlmock.Rows
+		queryErr error
+		want     []OrderItem
+		wantErr  bool
+	}{
+		{
+			name:    "success",
+			orderID: 100,
+			rows: sqlmock.NewRows([]string{
 				"id",
 				"order_id",
 				"product_id",
 				"quantity",
 				"unit_price",
 			}).
-				AddRow(
-					int64(1),
-					int64(100),
-					int64(1),
-					2,
-					int64(150000),
-				).
-				AddRow(
-					int64(2),
-					int64(100),
-					int64(2),
-					3,
-					int64(12000),
-				),
-		)
-
-	mock.ExpectRollback()
-	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("failed to begin transaction: %v", err)
+				AddRow(1, 100, 10, 2, 500).
+				AddRow(2, 100, 20, 1, 700),
+			want: []OrderItem{
+				{
+					ID:        1,
+					OrderID:   100,
+					ProductID: 10,
+					Quantity:  2,
+					UnitPrice: 500,
+				},
+				{
+					ID:        2,
+					OrderID:   100,
+					ProductID: 20,
+					Quantity:  1,
+					UnitPrice: 700,
+				},
+			},
+		},
+		{
+			name:    "empty result",
+			orderID: 100,
+			rows: sqlmock.NewRows([]string{
+				"id",
+				"order_id",
+				"product_id",
+				"quantity",
+				"unit_price",
+			}),
+			want: []OrderItem{},
+		},
+		{
+			name:     "query error",
+			orderID:  100,
+			queryErr: errors.New("query failed"),
+			wantErr:  true,
+		},
+		{
+			name:    "scan error",
+			orderID: 100,
+			rows: sqlmock.NewRows([]string{
+				"id",
+				"order_id",
+				"product_id",
+				"quantity",
+				"unit_price",
+			}).AddRow(
+				"invalid-id",
+				100,
+				10,
+				2,
+				500,
+			),
+			wantErr: true,
+		},
+		{
+			name:    "rows error",
+			orderID: 100,
+			rows: sqlmock.NewRows([]string{
+				"id",
+				"order_id",
+				"product_id",
+				"quantity",
+				"unit_price",
+			}).
+				AddRow(1, 100, 10, 2, 500).
+				RowError(0, errors.New("row iteration failed")),
+			wantErr: true,
+		},
 	}
 
-	items, err := repository.GetItems(
-		context.Background(),
-		tx,
-		100,
-	)
+	for _, tt := range tests {
+		tt := tt
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	if len(items) != 2 {
-		t.Fatalf(
-			"expected 2 items, got %d",
-			len(items),
-		)
-	}
+			mock, tx := newMockTx(t)
 
-	if items[0].ID != 1 {
-		t.Fatalf("expected first item ID 1, got %d", items[0].ID)
-	}
-
-	if items[0].ProductID != 1 {
-		t.Fatalf(
-			"expected first product ID 1, got %d",
-			items[0].ProductID,
-		)
-	}
-
-	if items[0].Quantity != 2 {
-		t.Fatalf(
-			"expected first quantity 2, got %d",
-			items[0].Quantity,
-		)
-	}
-
-	if items[1].ID != 2 {
-		t.Fatalf("expected second item ID 2, got %d", items[1].ID)
-	}
-
-	if items[1].ProductID != 2 {
-		t.Fatalf(
-			"expected second product ID 2, got %d",
-			items[1].ProductID,
-		)
-	}
-
-	if items[1].Quantity != 3 {
-		t.Fatalf(
-			"expected second quantity 3, got %d",
-			items[1].Quantity,
-		)
-	}
-
-	if err := tx.Rollback(); err != nil {
-		t.Fatalf("failed to rollback test transaction: %v", err)
-	}
-
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet SQL expectations: %v", err)
-	}
-}
-
-func TestPostgresRepository_GetItems_Error(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("failed to create sqlmock: %v", err)
-	}
-	defer db.Close()
-
-	repository := NewPostgresRepository()
-
-	expectedErr := errors.New("query order items failed")
-
-	mock.ExpectBegin()
-
-	mock.ExpectQuery(regexp.QuoteMeta(`
+			const query = `
 		SELECT
 			id,
 			order_id,
@@ -613,137 +532,511 @@ func TestPostgresRepository_GetItems_Error(t *testing.T) {
 		FROM order_items
 		WHERE order_id = $1
 		ORDER BY id
-	`)).
-		WithArgs(int64(100)).
-		WillReturnError(expectedErr)
+	`
 
-	mock.ExpectRollback()
-	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("failed to begin transaction: %v", err)
-	}
+			expect := mock.ExpectQuery(regexp.QuoteMeta(query)).
+				WithArgs(tt.orderID)
 
-	_, err = repository.GetItems(
-		context.Background(),
-		tx,
-		100,
-	)
+			if tt.queryErr != nil {
+				expect.WillReturnError(tt.queryErr)
+			} else {
+				expect.WillReturnRows(tt.rows)
+			}
 
-	if !errors.Is(err, expectedErr) {
-		t.Fatalf(
-			"expected %v, got %v",
-			expectedErr,
-			err,
-		)
-	}
+			repo := NewPostgresRepository()
 
-	if err := tx.Rollback(); err != nil {
-		t.Fatalf("failed to rollback test transaction: %v", err)
-	}
+			got, err := repo.GetItems(
+				context.Background(),
+				tx,
+				tt.orderID,
+			)
 
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet SQL expectations: %v", err)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("GetItems() error = nil, want error")
+				}
+
+				if got != nil {
+					t.Errorf("GetItems() = %+v, want nil", got)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("GetItems() error = %v", err)
+				}
+
+				if len(got) != len(tt.want) {
+					t.Fatalf(
+						"GetItems() len = %d, want %d",
+						len(got),
+						len(tt.want),
+					)
+				}
+
+				for i := range tt.want {
+					if got[i] != tt.want[i] {
+						t.Errorf(
+							"GetItems()[%d] = %+v, want %+v",
+							i,
+							got[i],
+							tt.want[i],
+						)
+					}
+				}
+			}
+
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("ExpectationsWereMet() error = %v", err)
+			}
+		})
 	}
 }
 
 func TestPostgresRepository_UpdateStatus(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("failed to create sqlmock: %v", err)
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		orderID int64
+		status  string
+		dbErr   error
+	}{
+		{
+			name:    "success",
+			orderID: 100,
+			status:  string(OrderStatusPaid),
+		},
+		{
+			name:    "database error",
+			orderID: 100,
+			status:  string(OrderStatusPaid),
+			dbErr:   errors.New("update failed"),
+		},
 	}
-	defer db.Close()
 
-	repository := NewPostgresRepository()
+	for _, tt := range tests {
+		tt := tt
 
-	mock.ExpectBegin()
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	mock.ExpectExec(regexp.QuoteMeta(`
+			mock, tx := newMockTx(t)
+
+			const query = `
 		UPDATE orders
 		SET status = $1
 		WHERE id = $2
-	`)).
-		WithArgs(
-			"cancelled",
-			int64(100),
-		).
-		WillReturnResult(
-			sqlmock.NewResult(0, 1),
-		)
-	mock.ExpectRollback()
-	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("failed to begin transaction: %v", err)
-	}
+	`
 
-	err = repository.UpdateStatus(
-		context.Background(),
-		tx,
-		100,
-		"cancelled",
+			expect := mock.ExpectExec(regexp.QuoteMeta(query)).
+				WithArgs(tt.status, tt.orderID)
+
+			if tt.dbErr != nil {
+				expect.WillReturnError(tt.dbErr)
+			} else {
+				expect.WillReturnResult(sqlmock.NewResult(0, 1))
+			}
+
+			repo := NewPostgresRepository()
+
+			err := repo.UpdateStatus(
+				context.Background(),
+				tx,
+				tt.orderID,
+				tt.status,
+			)
+
+			if tt.dbErr != nil {
+				if err == nil {
+					t.Fatal("UpdateStatus() error = nil, want error")
+				}
+			} else if err != nil {
+				t.Fatalf("UpdateStatus() error = %v", err)
+			}
+
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("ExpectationsWereMet() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestPostgresRepository_GetByID(t *testing.T) {
+	t.Parallel()
+
+	createdAt := time.Date(
+		2026,
+		time.August,
+		22,
+		12,
+		0,
+		0,
+		0,
+		time.UTC,
 	)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	tests := []struct {
+		name    string
+		id      int64
+		rows    *sqlmock.Rows
+		dbErr   error
+		want    Order
+		wantErr error
+	}{
+		{
+			name: "success",
+			id:   100,
+			rows: sqlmock.NewRows([]string{
+				"id",
+				"user_id",
+				"status",
+				"total_amount",
+				"currency",
+				"created_at",
+			}).AddRow(
+				100,
+				42,
+				string(OrderStatusPaid),
+				1500,
+				"EUR",
+				createdAt,
+			),
+			want: Order{
+				ID:          100,
+				UserID:      42,
+				Status:      string(OrderStatusPaid),
+				TotalAmount: 1500,
+				Currency:    "EUR",
+				CreatedAt:   createdAt,
+			},
+		},
+		{
+			name: "not found",
+			id:   999,
+			rows: sqlmock.NewRows([]string{
+				"id",
+				"user_id",
+				"status",
+				"total_amount",
+				"currency",
+				"created_at",
+			}),
+			want:    Order{},
+			wantErr: ErrOrderNotFound,
+		},
+		{
+			name:  "database error",
+			id:    100,
+			dbErr: errors.New("database unavailable"),
+			want:  Order{},
+		},
+		{
+			name: "scan error",
+			id:   100,
+			rows: sqlmock.NewRows([]string{
+				"id",
+				"user_id",
+				"status",
+				"total_amount",
+				"currency",
+				"created_at",
+			}).AddRow(
+				"invalid-id",
+				42,
+				string(OrderStatusPaid),
+				1500,
+				"EUR",
+				createdAt,
+			),
+			want: Order{},
+		},
 	}
 
-	if err := tx.Rollback(); err != nil {
-		t.Fatalf("failed to rollback test transaction: %v", err)
-	}
+	for _, tt := range tests {
+		tt := tt
 
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet SQL expectations: %v", err)
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, tx := newMockTx(t)
+
+			const query = `
+		SELECT
+			id,
+			user_id,
+			status,
+			total_amount,
+			currency,
+			created_at
+		FROM orders
+		WHERE id = $1
+	`
+
+			expect := mock.ExpectQuery(regexp.QuoteMeta(query)).
+				WithArgs(tt.id)
+
+			if tt.dbErr != nil {
+				expect.WillReturnError(tt.dbErr)
+			} else {
+				expect.WillReturnRows(tt.rows)
+			}
+
+			repo := NewPostgresRepository()
+
+			got, err := repo.GetByID(
+				context.Background(),
+				tx,
+				tt.id,
+			)
+
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf(
+						"GetByID() error = %v, want %v",
+						err,
+						tt.wantErr,
+					)
+				}
+			} else if tt.dbErr != nil {
+				if err == nil {
+					t.Fatal("GetByID() error = nil, want error")
+				}
+			} else if tt.name == "scan error" {
+				if err == nil {
+					t.Fatal("GetByID() error = nil, want error")
+				}
+			} else if err != nil {
+				t.Fatalf("GetByID() error = %v", err)
+			}
+
+			if got != tt.want {
+				t.Errorf(
+					"GetByID() = %+v, want %+v",
+					got,
+					tt.want,
+				)
+			}
+
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("ExpectationsWereMet() error = %v", err)
+			}
+		})
 	}
 }
 
-func TestPostgresRepository_UpdateStatus_Error(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("failed to create sqlmock: %v", err)
-	}
-	defer db.Close()
+func TestPostgresRepository_List(t *testing.T) {
+	t.Parallel()
 
-	repository := NewPostgresRepository()
-
-	expectedErr := errors.New("update status failed")
-
-	mock.ExpectBegin()
-
-	mock.ExpectExec(regexp.QuoteMeta(`
-		UPDATE orders
-		SET status = $1
-		WHERE id = $2
-	`)).
-		WithArgs(
-			"cancelled",
-			int64(100),
-		).
-		WillReturnError(expectedErr)
-	mock.ExpectRollback()
-	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("failed to begin transaction: %v", err)
-	}
-
-	err = repository.UpdateStatus(
-		context.Background(),
-		tx,
-		100,
-		"cancelled",
+	createdAt1 := time.Date(
+		2026,
+		time.August,
+		22,
+		12,
+		0,
+		0,
+		0,
+		time.UTC,
 	)
 
-	if !errors.Is(err, expectedErr) {
-		t.Fatalf(
-			"expected %v, got %v",
-			expectedErr,
-			err,
-		)
+	createdAt2 := time.Date(
+		2026,
+		time.August,
+		21,
+		12,
+		0,
+		0,
+		0,
+		time.UTC,
+	)
+
+	tests := []struct {
+		name     string
+		rows     *sqlmock.Rows
+		queryErr error
+		want     []Order
+		wantErr  bool
+	}{
+		{
+			name: "success",
+			rows: sqlmock.NewRows([]string{
+				"id",
+				"user_id",
+				"status",
+				"total_amount",
+				"currency",
+				"created_at",
+			}).
+				AddRow(
+					100,
+					42,
+					string(OrderStatusPaid),
+					1500,
+					"EUR",
+					createdAt1,
+				).
+				AddRow(
+					99,
+					43,
+					string(OrderStatusPending),
+					2500,
+					"USD",
+					createdAt2,
+				),
+			want: []Order{
+				{
+					ID:          100,
+					UserID:      42,
+					Status:      string(OrderStatusPaid),
+					TotalAmount: 1500,
+					Currency:    "EUR",
+					CreatedAt:   createdAt1,
+				},
+				{
+					ID:          99,
+					UserID:      43,
+					Status:      string(OrderStatusPending),
+					TotalAmount: 2500,
+					Currency:    "USD",
+					CreatedAt:   createdAt2,
+				},
+			},
+		},
+		{
+			name: "empty result",
+			rows: sqlmock.NewRows([]string{
+				"id",
+				"user_id",
+				"status",
+				"total_amount",
+				"currency",
+				"created_at",
+			}),
+			want: []Order{},
+		},
+		{
+			name:     "query error",
+			queryErr: errors.New("query failed"),
+			wantErr:  true,
+		},
+		{
+			name: "scan error",
+			rows: sqlmock.NewRows([]string{
+				"id",
+				"user_id",
+				"status",
+				"total_amount",
+				"currency",
+				"created_at",
+			}).AddRow(
+				"invalid-id",
+				42,
+				string(OrderStatusPaid),
+				1500,
+				"EUR",
+				createdAt1,
+			),
+			wantErr: true,
+		},
+		{
+			name: "rows error",
+			rows: sqlmock.NewRows([]string{
+				"id",
+				"user_id",
+				"status",
+				"total_amount",
+				"currency",
+				"created_at",
+			}).
+				AddRow(
+					100,
+					42,
+					string(OrderStatusPaid),
+					1500,
+					"EUR",
+					createdAt1,
+				).
+				RowError(
+					0,
+					errors.New("row iteration failed"),
+				),
+			wantErr: true,
+		},
 	}
 
-	if err := tx.Rollback(); err != nil {
-		t.Fatalf("failed to rollback test transaction: %v", err)
-	}
+	for _, tt := range tests {
+		tt := tt
 
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet SQL expectations: %v", err)
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, tx := newMockTx(t)
+
+			const query = `
+		SELECT
+			id,
+			user_id,
+			status,
+			total_amount,
+			currency,
+			created_at
+		FROM orders
+		ORDER BY id DESC
+	`
+
+			expect := mock.ExpectQuery(regexp.QuoteMeta(query))
+
+			if tt.queryErr != nil {
+				expect.WillReturnError(tt.queryErr)
+			} else {
+				expect.WillReturnRows(tt.rows)
+			}
+
+			repo := NewPostgresRepository()
+
+			got, err := repo.List(
+				context.Background(),
+				tx,
+			)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("List() error = nil, want error")
+				}
+
+				if got != nil {
+					t.Errorf("List() = %+v, want nil", got)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("List() error = %v", err)
+				}
+
+				if len(got) != len(tt.want) {
+					t.Fatalf(
+						"List() len = %d, want %d",
+						len(got),
+						len(tt.want),
+					)
+				}
+
+				for i := range tt.want {
+					if got[i] != tt.want[i] {
+						t.Errorf(
+							"List()[%d] = %+v, want %+v",
+							i,
+							got[i],
+							tt.want[i],
+						)
+					}
+				}
+			}
+
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("ExpectationsWereMet() error = %v", err)
+			}
+		})
 	}
 }
+
+var _ Repository = (*PostgresRepository)(nil)
+
+var _ database.Tx = (*sql.Tx)(nil)

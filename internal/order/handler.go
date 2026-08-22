@@ -1,6 +1,7 @@
 package order
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
@@ -10,6 +11,42 @@ import (
 
 	"github.com/MatveyArbuzov/fincart/internal/auth"
 )
+
+type ServiceInterface interface {
+	CreateOrder(
+		ctx context.Context,
+		userID int64,
+		request CreateOrderRequest,
+	) (Order, error)
+
+	CancelOrder(
+		ctx context.Context,
+		userID int64,
+		orderID int64,
+	) error
+
+	GetOrder(
+		ctx context.Context,
+		userID int64,
+		orderID int64,
+	) (Order, []OrderItem, error)
+
+	PayOrder(
+		ctx context.Context,
+		userID int64,
+		orderID int64,
+	) error
+
+	ListOrders(
+		ctx context.Context,
+	) ([]Order, error)
+
+	UpdateOrderStatus(
+		ctx context.Context,
+		orderID int64,
+		status string,
+	) error
+}
 
 type errorResponse struct {
 	Error string `json:"error"`
@@ -31,10 +68,10 @@ func writeError(
 }
 
 type Handler struct {
-	service *Service
+	service ServiceInterface
 }
 
-func NewHandler(service *Service) *Handler {
+func NewHandler(service ServiceInterface) *Handler {
 	return &Handler{
 		service: service,
 	}

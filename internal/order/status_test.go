@@ -3,55 +3,74 @@ package order
 import "testing"
 
 func TestOrderStatus_IsValid(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name   string
 		status OrderStatus
-		valid  bool
+		want   bool
 	}{
+		{
+			name:   "draft",
+			status: OrderStatusDraft,
+			want:   true,
+		},
 		{
 			name:   "pending",
 			status: OrderStatusPending,
-			valid:  true,
+			want:   true,
 		},
 		{
 			name:   "paid",
 			status: OrderStatusPaid,
-			valid:  true,
+			want:   true,
 		},
 		{
 			name:   "processing",
 			status: OrderStatusProcessing,
-			valid:  true,
+			want:   true,
 		},
 		{
 			name:   "shipped",
 			status: OrderStatusShipped,
-			valid:  true,
+			want:   true,
 		},
 		{
 			name:   "completed",
 			status: OrderStatusCompleted,
-			valid:  true,
+			want:   true,
 		},
 		{
 			name:   "cancelled",
 			status: OrderStatusCancelled,
-			valid:  true,
+			want:   true,
+		},
+		{
+			name:   "empty",
+			status: "",
+			want:   false,
 		},
 		{
 			name:   "unknown",
-			status: OrderStatus("banana"),
-			valid:  false,
+			status: OrderStatus("unknown"),
+			want:   false,
+		},
+		{
+			name:   "similar status",
+			status: OrderStatus("Pending"),
+			want:   false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.status.IsValid(); got != tt.valid {
+			t.Parallel()
+
+			if got := tt.status.IsValid(); got != tt.want {
 				t.Fatalf(
-					"expected %v, got %v",
-					tt.valid,
+					"IsValid() = %v, want %v",
 					got,
+					tt.want,
 				)
 			}
 		})
@@ -59,12 +78,15 @@ func TestOrderStatus_IsValid(t *testing.T) {
 }
 
 func TestCanTransition(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name string
 		from OrderStatus
 		to   OrderStatus
 		want bool
 	}{
+		// Pending
 		{
 			name: "pending to paid",
 			from: OrderStatusPending,
@@ -78,11 +100,27 @@ func TestCanTransition(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "pending to processing",
+			from: OrderStatusPending,
+			to:   OrderStatusProcessing,
+			want: false,
+		},
+
+		// Paid
+		{
 			name: "paid to processing",
 			from: OrderStatusPaid,
 			to:   OrderStatusProcessing,
 			want: true,
 		},
+		{
+			name: "paid to cancelled",
+			from: OrderStatusPaid,
+			to:   OrderStatusCancelled,
+			want: false,
+		},
+
+		// Processing
 		{
 			name: "processing to shipped",
 			from: OrderStatusProcessing,
@@ -90,44 +128,92 @@ func TestCanTransition(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "processing to completed",
+			from: OrderStatusProcessing,
+			to:   OrderStatusCompleted,
+			want: false,
+		},
+
+		// Shipped
+		{
 			name: "shipped to completed",
 			from: OrderStatusShipped,
 			to:   OrderStatusCompleted,
 			want: true,
 		},
 		{
-			name: "cancelled to paid",
+			name: "shipped to cancelled",
+			from: OrderStatusShipped,
+			to:   OrderStatusCancelled,
+			want: false,
+		},
+
+		// States without outgoing transitions
+		{
+			name: "draft to pending",
+			from: OrderStatusDraft,
+			to:   OrderStatusPending,
+			want: false,
+		},
+		{
+			name: "completed to anything",
+			from: OrderStatusCompleted,
+			to:   OrderStatusPending,
+			want: false,
+		},
+		{
+			name: "cancelled to anything",
 			from: OrderStatusCancelled,
+			to:   OrderStatusPending,
+			want: false,
+		},
+
+		// Self transitions
+		{
+			name: "pending to pending",
+			from: OrderStatusPending,
+			to:   OrderStatusPending,
+			want: false,
+		},
+		{
+			name: "paid to paid",
+			from: OrderStatusPaid,
+			to:   OrderStatusPaid,
+			want: false,
+		},
+
+		// Invalid statuses
+		{
+			name: "unknown from",
+			from: OrderStatus("unknown"),
 			to:   OrderStatusPaid,
 			want: false,
 		},
 		{
-			name: "completed to cancelled",
-			from: OrderStatusCompleted,
-			to:   OrderStatusCancelled,
-			want: false,
-		},
-		{
-			name: "pending to completed",
+			name: "unknown to",
 			from: OrderStatusPending,
-			to:   OrderStatusCompleted,
+			to:   OrderStatus("unknown"),
 			want: false,
 		},
 		{
-			name: "shipped to pending",
-			from: OrderStatusShipped,
-			to:   OrderStatusPending,
+			name: "both unknown",
+			from: OrderStatus("foo"),
+			to:   OrderStatus("bar"),
 			want: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			if got := CanTransition(tt.from, tt.to); got != tt.want {
 				t.Fatalf(
-					"expected %v, got %v",
-					tt.want,
+					"CanTransition(%q, %q) = %v, want %v",
+					tt.from,
+					tt.to,
 					got,
+					tt.want,
 				)
 			}
 		})

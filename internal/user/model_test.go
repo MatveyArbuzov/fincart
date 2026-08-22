@@ -3,35 +3,44 @@ package user
 import "testing"
 
 func TestRole_IsValid(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
-		name string
 		role Role
 		want bool
 	}{
 		{
-			name: "user",
 			role: RoleUser,
 			want: true,
 		},
 		{
-			name: "admin",
 			role: RoleAdmin,
 			want: true,
 		},
 		{
-			name: "unknown",
-			role: Role("banana"),
+			role: Role(""),
+			want: false,
+		},
+		{
+			role: Role("manager"),
+			want: false,
+		},
+		{
+			role: Role("ADMIN"),
 			want: false,
 		},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+		t.Run(string(tt.role), func(t *testing.T) {
+			t.Parallel()
+
 			if got := tt.role.IsValid(); got != tt.want {
 				t.Fatalf(
-					"expected %v, got %v",
-					tt.want,
+					"Role(%q).IsValid() = %v, want %v",
+					tt.role,
 					got,
+					tt.want,
 				)
 			}
 		})

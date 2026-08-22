@@ -1,19 +1,29 @@
 package cart
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
 
 	"github.com/MatveyArbuzov/fincart/internal/auth"
+	"github.com/MatveyArbuzov/fincart/internal/order"
 )
 
-type Handler struct {
-	service *Service
+type ServiceInterface interface {
+	GetCart(ctx context.Context, userID int64) (Cart, error)
+	AddItem(ctx context.Context, userID int64, request AddItemRequest) (Cart, error)
+	UpdateItem(ctx context.Context, userID, productID int64, quantity int) (Cart, error)
+	DeleteItem(ctx context.Context, userID, productID int64) (Cart, error)
+	Checkout(ctx context.Context, userID int64) (order.Order, error)
 }
 
-func NewHandler(service *Service) *Handler {
+type Handler struct {
+	service ServiceInterface
+}
+
+func NewHandler(service ServiceInterface) *Handler {
 	return &Handler{
 		service: service,
 	}

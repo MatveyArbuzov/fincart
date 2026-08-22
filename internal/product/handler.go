@@ -1,17 +1,43 @@
 package product
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
 )
 
-type Handler struct {
-	service *Service
+type ServiceInterface interface {
+	GetProducts(ctx context.Context) ([]Product, error)
+
+	GetProductByID(
+		ctx context.Context,
+		id int64,
+	) (Product, error)
+
+	CreateProduct(
+		ctx context.Context,
+		request CreateProductRequest,
+	) (Product, error)
+
+	UpdateProduct(
+		ctx context.Context,
+		id int64,
+		request UpdateProductRequest,
+	) (Product, error)
+
+	DeleteProduct(
+		ctx context.Context,
+		id int64,
+	) error
 }
 
-func NewHandler(service *Service) *Handler {
+type Handler struct {
+	service ServiceInterface
+}
+
+func NewHandler(service ServiceInterface) *Handler {
 	return &Handler{
 		service: service,
 	}

@@ -5,7 +5,23 @@ import (
 	"testing"
 )
 
+func TestNewFakeService(t *testing.T) {
+	t.Parallel()
+
+	service := NewFakeService(ResultSuccess)
+
+	if service.Result != ResultSuccess {
+		t.Fatalf(
+			"Result = %q, want %q",
+			service.Result,
+			ResultSuccess,
+		)
+	}
+}
+
 func TestFakeService_Pay(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name   string
 		result Result
@@ -26,24 +42,26 @@ func TestFakeService_Pay(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			service := NewFakeService(tt.result)
 
-			result, err := service.Pay(
+			got, err := service.Pay(
 				context.Background(),
-				100,
-				300000,
-				"EUR",
+				123,
+				1000,
+				"USD",
 			)
 
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
-			if result != tt.result {
+			if got != tt.result {
 				t.Fatalf(
-					"expected %s, got %s",
+					"result = %q, want %q",
+					got,
 					tt.result,
-					result,
 				)
 			}
 		})

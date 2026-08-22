@@ -2,570 +2,198 @@ package order
 
 import (
 	"context"
+	"database/sql"
 	"errors"
-	"regexp"
-	"strings"
 	"testing"
-	"time"
-
-	"github.com/DATA-DOG/go-sqlmock"
 
 	"github.com/MatveyArbuzov/fincart/internal/database"
 	"github.com/MatveyArbuzov/fincart/internal/payment"
 	"github.com/MatveyArbuzov/fincart/internal/product"
 )
 
-func TestCreateOrder(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("failed to create sqlmock: %v", err)
-	}
-	defer db.Close()
+type fakeOrderTx struct{}
 
-	transactionManager := database.NewManager(db)
+func (fakeOrderTx) Commit() error   { return nil }
+func (fakeOrderTx) Rollback() error { return nil }
 
-	productRepository := product.NewPostgresTransactionRepository()
-	orderRepository := NewPostgresRepository()
+func (fakeOrderTx) ExecContext(
+	context.Context,
+	string,
+	...any,
+) (sql.Result, error) {
+	return nil, nil
+}
 
-	service := NewService(
-		transactionManager,
-		productRepository,
-		orderRepository,
-		payment.NewFakeService(payment.ResultSuccess),
-	)
+func (fakeOrderTx) QueryContext(
+	context.Context,
+	string,
+	...any,
+) (*sql.Rows, error) {
+	return nil, nil
+}
 
-	mock.ExpectBegin()
+func (fakeOrderTx) QueryRowContext(
+	context.Context,
+	string,
+	...any,
+) *sql.Row {
+	return nil
+}
 
-	mock.ExpectQuery(regexp.QuoteMeta(`
-		SELECT
-			id,
-			name,
-			description,
-			price,
-			currency,
-			stock
-		FROM products
-		WHERE id = $1
-		FOR UPDATE
-	`)).
-		WithArgs(int64(1)).
-		WillReturnRows(
-			sqlmock.NewRows([]string{
-				"id",
-				"name",
-				"description",
-				"price",
-				"currency",
-				"stock",
-			}).AddRow(
-				int64(1),
-				"MacBook",
-				"Laptop",
-				int64(150000),
-				"EUR",
-				10,
-			),
-		)
+type fakeOrderTransactionManager struct {
+	err error
 
-	mock.ExpectQuery(regexp.QuoteMeta(`
-		INSERT INTO orders (
-			user_id,
-			status,
-			total_amount,
-			currency
-		)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id, created_at
-	`)).
-		WithArgs(
-			int64(10),
-			"pending",
-			int64(300000),
-			"EUR",
-		).
-		WillReturnRows(
-			sqlmock.NewRows([]string{
-				"id",
-				"created_at",
-			}).AddRow(
-				int64(100),
-				time.Now(),
-			),
-		)
+	calls int
+}
 
-	mock.ExpectQuery(regexp.QuoteMeta(`
-		INSERT INTO order_items (
-			order_id,
-			product_id,
-			quantity,
-			unit_price
-		)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id
-	`)).
-		WithArgs(
-			int64(100),
-			int64(1),
-			2,
-			int64(150000),
-		).
-		WillReturnRows(
-			sqlmock.NewRows([]string{
-				"id",
-			}).AddRow(
-				int64(1),
-			),
-		)
+func (f *fakeOrderTransactionManager) WithinTransaction(
+	ctx context.Context,
+	fn func(tx database.Tx) error,
+) error {
+	f.calls++
 
-	mock.ExpectExec(regexp.QuoteMeta(`
-		UPDATE products
-		SET stock = stock - $1
-		WHERE id = $2
-	`)).
-		WithArgs(
-			2,
-			int64(1),
-		).
-		WillReturnResult(
-			sqlmock.NewResult(0, 1),
-		)
-
-	mock.ExpectCommit()
-
-	result, err := service.CreateOrder(
-		context.Background(),
-		10,
-		CreateOrderRequest{
-			Items: []CreateOrderItem{
-				{
-					ProductID: 1,
-					Quantity:  2,
-				},
-			},
-		},
-	)
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if f.err != nil {
+		return f.err
 	}
 
-	if result.ID != 100 {
-		t.Fatalf(
-			"expected order ID 100, got %d",
-			result.ID,
-		)
+	return fn(fakeOrderTx{})
+}
+
+type fakeOrderProductRepository struct {
+	products map[int64]product.Product
+
+	getErr map[int64]error
+
+	decreased []struct {
+		id       int64
+		quantity int
 	}
 
-	if result.UserID != 10 {
-		t.Fatalf(
-			"expected user ID 10, got %d",
-			result.UserID,
-		)
-	}
-
-	if result.Status != "pending" {
-		t.Fatalf(
-			"expected status pending, got %s",
-			result.Status,
-		)
-	}
-
-	if result.TotalAmount != 300000 {
-		t.Fatalf(
-			"expected total amount 300000, got %d",
-			result.TotalAmount,
-		)
-	}
-
-	if result.Currency != "EUR" {
-		t.Fatalf(
-			"expected currency EUR, got %s",
-			result.Currency,
-		)
-	}
-
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf(
-			"there were unmet SQL expectations: %v",
-			err,
-		)
+	increased []struct {
+		id       int64
+		quantity int
 	}
 }
 
-func TestCreateOrder_InsufficientStock(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("failed to create sqlmock: %v", err)
-	}
-	defer db.Close()
-
-	transactionManager := database.NewManager(db)
-
-	productRepository := product.NewPostgresTransactionRepository()
-	orderRepository := NewPostgresRepository()
-
-	service := NewService(
-		transactionManager,
-		productRepository,
-		orderRepository,
-		payment.NewFakeService(payment.ResultSuccess),
-	)
-
-	mock.ExpectBegin()
-
-	mock.ExpectQuery(regexp.QuoteMeta(`
-		SELECT
-			id,
-			name,
-			description,
-			price,
-			currency,
-			stock
-		FROM products
-		WHERE id = $1
-		FOR UPDATE
-	`)).
-		WithArgs(int64(1)).
-		WillReturnRows(
-			sqlmock.NewRows([]string{
-				"id",
-				"name",
-				"description",
-				"price",
-				"currency",
-				"stock",
-			}).AddRow(
-				int64(1),
-				"MacBook",
-				"Laptop",
-				int64(150000),
-				"EUR",
-				1,
-			),
-		)
-
-	mock.ExpectRollback()
-
-	_, err = service.CreateOrder(
-		context.Background(),
-		10,
-		CreateOrderRequest{
-			Items: []CreateOrderItem{
-				{
-					ProductID: 1,
-					Quantity:  2,
-				},
-			},
-		},
-	)
-
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-
-	if !errors.Is(err, ErrInsufficientStock) {
-		t.Fatalf(
-			"expected ErrInsufficientStock, got %v",
-			err,
-		)
-	}
-
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf(
-			"there were unmet SQL expectations: %v",
-			err,
-		)
-	}
-}
-
-func TestCreateOrder_OrderItemCreationFailed(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("failed to create sqlmock: %v", err)
-	}
-	defer db.Close()
-
-	transactionManager := database.NewManager(db)
-
-	productRepository := product.NewPostgresTransactionRepository()
-	orderRepository := NewPostgresRepository()
-
-	service := NewService(
-		transactionManager,
-		productRepository,
-		orderRepository,
-		payment.NewFakeService(payment.ResultSuccess),
-	)
-
-	mock.ExpectBegin()
-
-	mock.ExpectQuery(regexp.QuoteMeta(`
-		SELECT
-			id,
-			name,
-			description,
-			price,
-			currency,
-			stock
-		FROM products
-		WHERE id = $1
-		FOR UPDATE
-	`)).
-		WithArgs(int64(1)).
-		WillReturnRows(
-			sqlmock.NewRows([]string{
-				"id",
-				"name",
-				"description",
-				"price",
-				"currency",
-				"stock",
-			}).AddRow(
-				int64(1),
-				"MacBook",
-				"Laptop",
-				int64(150000),
-				"EUR",
-				10,
-			),
-		)
-
-	mock.ExpectQuery(regexp.QuoteMeta(`
-		INSERT INTO orders (
-			user_id,
-			status,
-			total_amount,
-			currency
-		)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id, created_at
-	`)).
-		WithArgs(
-			int64(10),
-			"pending",
-			int64(300000),
-			"EUR",
-		).
-		WillReturnRows(
-			sqlmock.NewRows([]string{
-				"id",
-				"created_at",
-			}).AddRow(
-				int64(100),
-				time.Now(),
-			),
-		)
-
-	mock.ExpectQuery(regexp.QuoteMeta(`
-		INSERT INTO order_items (
-			order_id,
-			product_id,
-			quantity,
-			unit_price
-		)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id
-	`)).
-		WithArgs(
-			int64(100),
-			int64(1),
-			2,
-			int64(150000),
-		).
-		WillReturnError(
-			errors.New("failed to create order item"),
-		)
-
-	mock.ExpectRollback()
-
-	// Act
-	_, err = service.CreateOrder(
-		context.Background(),
-		10,
-		CreateOrderRequest{
-			Items: []CreateOrderItem{
-				{
-					ProductID: 1,
-					Quantity:  2,
-				},
-			},
-		},
-	)
-
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-
-	if !strings.Contains(err.Error(), "failed to create order item") {
-		t.Fatalf(
-			"expected order item error, got %v",
-			err,
-		)
-	}
-
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf(
-			"there were unmet SQL expectations: %v",
-			err,
-		)
-	}
-}
-
-func TestService_CreateOrder_DifferentCurrencies(t *testing.T) {
-	productRepository := &fakeMultiProductRepository{
-		products: map[int64]product.Product{
-			1: {
-				ID:       1,
-				Name:     "MacBook",
-				Price:    150000,
-				Currency: "EUR",
-				Stock:    10,
-			},
-			2: {
-				ID:       2,
-				Name:     "iPhone",
-				Price:    100000,
-				Currency: "USD",
-				Stock:    10,
-			},
-		},
-	}
-
-	orderRepository := &fakeOrderRepository{}
-	transactionManager := &fakeTransactionManager{}
-
-	service := NewService(
-		transactionManager,
-		productRepository,
-		orderRepository,
-		payment.NewFakeService(payment.ResultSuccess),
-	)
-
-	request := CreateOrderRequest{
-		Items: []CreateOrderItem{
-			{
-				ProductID: 1,
-				Quantity:  1,
-			},
-			{
-				ProductID: 2,
-				Quantity:  1,
-			},
-		},
-	}
-
-	_, err := service.CreateOrder(
-		context.Background(),
-		10,
-		request,
-	)
-
-	if !errors.Is(err, ErrDifferentCurrencies) {
-		t.Fatalf(
-			"expected ErrDifferentCurrencies, got %v",
-			err,
-		)
-	}
-}
-
-type cancelTestProductRepository struct {
-	increaseStockErr error
-
-	increasedProducts map[int64]int
-}
-
-func (f *cancelTestProductRepository) GetByIDForUpdate(
+func (f *fakeOrderProductRepository) GetByIDForUpdate(
 	ctx context.Context,
 	tx database.Tx,
 	id int64,
 ) (product.Product, error) {
-	return product.Product{}, nil
+	if err := f.getErr[id]; err != nil {
+		return product.Product{}, err
+	}
+
+	p, ok := f.products[id]
+	if !ok {
+		return product.Product{}, product.ErrProductNotFound
+	}
+
+	return p, nil
 }
 
-func (f *cancelTestProductRepository) DecreaseStock(
+func (f *fakeOrderProductRepository) DecreaseStock(
 	ctx context.Context,
 	tx database.Tx,
 	id int64,
 	quantity int,
 ) error {
+	f.decreased = append(
+		f.decreased,
+		struct {
+			id       int64
+			quantity int
+		}{id, quantity},
+	)
+
 	return nil
 }
 
-func (f *cancelTestProductRepository) IncreaseStock(
+func (f *fakeOrderProductRepository) IncreaseStock(
 	ctx context.Context,
 	tx database.Tx,
 	id int64,
 	quantity int,
 ) error {
-	if f.increaseStockErr != nil {
-		return f.increaseStockErr
-	}
-
-	if f.increasedProducts == nil {
-		f.increasedProducts = make(map[int64]int)
-	}
-
-	f.increasedProducts[id] += quantity
+	f.increased = append(
+		f.increased,
+		struct {
+			id       int64
+			quantity int
+		}{id, quantity},
+	)
 
 	return nil
 }
 
-type cancelTestOrderRepository struct {
-	order       Order
-	items       []OrderItem
-	getOrderErr error
-	getItemsErr error
-	updateErr   error
+type fakeOrderRepository struct {
+	order  Order
+	orders []Order
+	items  []OrderItem
+
+	getByIDErr          error
+	getByIDForUpdateErr error
+	getItemsErr         error
+	createErr           error
+	createItemErr       error
+	updateStatusErr     error
+	listErr             error
+
+	created      Order
+	createdItems []OrderItem
 
 	updatedOrderID int64
 	updatedStatus  string
 }
 
-func (f *cancelTestOrderRepository) GetByID(
-	ctx context.Context,
-	tx database.Tx,
-	id int64,
-) (Order, error) {
-	if f.getOrderErr != nil {
-		return Order{}, f.getOrderErr
-	}
-
-	if f.order.ID != id {
-		return Order{}, ErrOrderNotFound
-	}
-
-	return f.order, nil
-}
-
-func (f *cancelTestOrderRepository) Create(
+func (f *fakeOrderRepository) Create(
 	ctx context.Context,
 	tx database.Tx,
 	order Order,
 ) (Order, error) {
+	if f.createErr != nil {
+		return Order{}, f.createErr
+	}
+
+	if order.ID == 0 {
+		order.ID = 100
+	}
+
+	f.created = order
 	return order, nil
 }
 
-func (f *cancelTestOrderRepository) CreateItem(
+func (f *fakeOrderRepository) CreateItem(
 	ctx context.Context,
 	tx database.Tx,
 	item OrderItem,
 ) (OrderItem, error) {
+	if f.createItemErr != nil {
+		return OrderItem{}, f.createItemErr
+	}
+
+	if item.ID == 0 {
+		item.ID = int64(len(f.createdItems) + 1)
+	}
+
+	f.createdItems = append(f.createdItems, item)
+
 	return item, nil
 }
 
-func (f *cancelTestOrderRepository) GetByIDForUpdate(
+func (f *fakeOrderRepository) GetByIDForUpdate(
 	ctx context.Context,
 	tx database.Tx,
 	id int64,
 ) (Order, error) {
-	if f.getOrderErr != nil {
-		return Order{}, f.getOrderErr
+	if f.getByIDForUpdateErr != nil {
+		return Order{}, f.getByIDForUpdateErr
 	}
 
 	return f.order, nil
 }
 
-func (f *cancelTestOrderRepository) GetItems(
+func (f *fakeOrderRepository) GetItems(
 	ctx context.Context,
 	tx database.Tx,
 	orderID int64,
@@ -577,14 +205,14 @@ func (f *cancelTestOrderRepository) GetItems(
 	return f.items, nil
 }
 
-func (f *cancelTestOrderRepository) UpdateStatus(
+func (f *fakeOrderRepository) UpdateStatus(
 	ctx context.Context,
 	tx database.Tx,
 	orderID int64,
 	status string,
 ) error {
-	if f.updateErr != nil {
-		return f.updateErr
+	if f.updateStatusErr != nil {
+		return f.updateStatusErr
 	}
 
 	f.updatedOrderID = orderID
@@ -593,636 +221,30 @@ func (f *cancelTestOrderRepository) UpdateStatus(
 	return nil
 }
 
-func TestCancelOrder_Success(t *testing.T) {
-	productRepository := &cancelTestProductRepository{}
-
-	orderRepository := &cancelTestOrderRepository{
-		order: Order{
-			ID:     100,
-			UserID: 10,
-			Status: "pending",
-		},
-		items: []OrderItem{
-			{
-				ID:        1,
-				OrderID:   100,
-				ProductID: 1,
-				Quantity:  2,
-				UnitPrice: 150000,
-			},
-			{
-				ID:        2,
-				OrderID:   100,
-				ProductID: 2,
-				Quantity:  3,
-				UnitPrice: 12000,
-			},
-		},
-	}
-
-	service := NewService(
-		&fakeTransactionManager{},
-		productRepository,
-		orderRepository,
-		payment.NewFakeService(payment.ResultSuccess),
-	)
-
-	err := service.CancelOrder(
-		context.Background(),
-		10,
-		100,
-	)
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if productRepository.increasedProducts[1] != 2 {
-		t.Fatalf(
-			"expected product 1 stock increase by 2, got %d",
-			productRepository.increasedProducts[1],
-		)
-	}
-
-	if productRepository.increasedProducts[2] != 3 {
-		t.Fatalf(
-			"expected product 2 stock increase by 3, got %d",
-			productRepository.increasedProducts[2],
-		)
-	}
-
-	if orderRepository.updatedOrderID != 100 {
-		t.Fatalf(
-			"expected updated order ID 100, got %d",
-			orderRepository.updatedOrderID,
-		)
-	}
-
-	if orderRepository.updatedStatus != "cancelled" {
-		t.Fatalf(
-			"expected status cancelled, got %s",
-			orderRepository.updatedStatus,
-		)
-	}
-}
-
-func TestCancelOrder_InvalidOrderID(t *testing.T) {
-	service := NewService(
-		&fakeTransactionManager{},
-		&cancelTestProductRepository{},
-		&cancelTestOrderRepository{},
-		payment.NewFakeService(payment.ResultSuccess),
-	)
-
-	err := service.CancelOrder(
-		context.Background(),
-		10,
-		0,
-	)
-
-	if !errors.Is(err, ErrInvalidOrder) {
-		t.Fatalf(
-			"expected ErrInvalidOrder, got %v",
-			err,
-		)
-	}
-}
-
-func TestCancelOrder_NegativeOrderID(t *testing.T) {
-	service := NewService(
-		&fakeTransactionManager{},
-		&cancelTestProductRepository{},
-		&cancelTestOrderRepository{},
-		payment.NewFakeService(payment.ResultSuccess),
-	)
-
-	err := service.CancelOrder(
-		context.Background(),
-		10,
-		-1,
-	)
-
-	if !errors.Is(err, ErrInvalidOrder) {
-		t.Fatalf(
-			"expected ErrInvalidOrder, got %v",
-			err,
-		)
-	}
-}
-
-func TestCancelOrder_OrderNotFound(t *testing.T) {
-	expectedErr := ErrOrderNotFound
-
-	orderRepository := &cancelTestOrderRepository{
-		getOrderErr: expectedErr,
-	}
-
-	service := NewService(
-		&fakeTransactionManager{},
-		&cancelTestProductRepository{},
-		orderRepository,
-		payment.NewFakeService(payment.ResultSuccess),
-	)
-
-	err := service.CancelOrder(
-		context.Background(),
-		10,
-		100,
-	)
-
-	if !errors.Is(err, expectedErr) {
-		t.Fatalf(
-			"expected ErrOrderNotFound, got %v",
-			err,
-		)
-	}
-}
-
-func TestCancelOrder_GetOrderError(t *testing.T) {
-	expectedErr := errors.New("database error")
-
-	orderRepository := &cancelTestOrderRepository{
-		getOrderErr: expectedErr,
-	}
-
-	service := NewService(
-		&fakeTransactionManager{},
-		&cancelTestProductRepository{},
-		orderRepository,
-		payment.NewFakeService(payment.ResultSuccess),
-	)
-
-	err := service.CancelOrder(
-		context.Background(),
-		10,
-		100,
-	)
-
-	if !errors.Is(err, expectedErr) {
-		t.Fatalf(
-			"expected database error, got %v",
-			err,
-		)
-	}
-}
-
-func TestCancelOrder_InvalidOrderState(t *testing.T) {
-	orderRepository := &cancelTestOrderRepository{
-		order: Order{
-			ID:     100,
-			UserID: 10,
-			Status: "completed",
-		},
-	}
-
-	productRepository := &cancelTestProductRepository{}
-
-	service := NewService(
-		&fakeTransactionManager{},
-		productRepository,
-		orderRepository,
-		payment.NewFakeService(payment.ResultSuccess),
-	)
-
-	err := service.CancelOrder(
-		context.Background(),
-		10,
-		100,
-	)
-
-	if !errors.Is(err, ErrInvalidOrderState) {
-		t.Fatalf(
-			"expected ErrInvalidOrderState, got %v",
-			err,
-		)
-	}
-
-	if len(productRepository.increasedProducts) != 0 {
-		t.Fatal("stock must not be increased for invalid order state")
-	}
-
-	if orderRepository.updatedOrderID != 0 {
-		t.Fatal("order status must not be updated")
-	}
-}
-
-func TestCancelOrder_GetItemsError(t *testing.T) {
-	expectedErr := errors.New("failed to get order items")
-
-	orderRepository := &cancelTestOrderRepository{
-		order: Order{
-			ID:     100,
-			UserID: 10,
-			Status: "pending",
-		},
-		getItemsErr: expectedErr,
-	}
-
-	productRepository := &cancelTestProductRepository{}
-
-	service := NewService(
-		&fakeTransactionManager{},
-		productRepository,
-		orderRepository,
-		payment.NewFakeService(payment.ResultSuccess),
-	)
-
-	err := service.CancelOrder(
-		context.Background(),
-		10,
-		100,
-	)
-
-	if !errors.Is(err, expectedErr) {
-		t.Fatalf(
-			"expected items error, got %v",
-			err,
-		)
-	}
-
-	if len(productRepository.increasedProducts) != 0 {
-		t.Fatal("stock must not be increased when getting items fails")
-	}
-}
-
-func TestCancelOrder_IncreaseStockError(t *testing.T) {
-	expectedErr := errors.New("failed to increase stock")
-
-	productRepository := &cancelTestProductRepository{
-		increaseStockErr: expectedErr,
-	}
-
-	orderRepository := &cancelTestOrderRepository{
-		order: Order{
-			ID:     100,
-			UserID: 10,
-			Status: "pending",
-		},
-		items: []OrderItem{
-			{
-				ID:        1,
-				OrderID:   100,
-				ProductID: 1,
-				Quantity:  2,
-				UnitPrice: 150000,
-			},
-		},
-	}
-
-	service := NewService(
-		&fakeTransactionManager{},
-		productRepository,
-		orderRepository,
-		payment.NewFakeService(payment.ResultSuccess),
-	)
-
-	err := service.CancelOrder(
-		context.Background(),
-		10,
-		100,
-	)
-
-	if !errors.Is(err, expectedErr) {
-		t.Fatalf(
-			"expected increase stock error, got %v",
-			err,
-		)
-	}
-
-	if orderRepository.updatedOrderID != 0 {
-		t.Fatal("order status must not be updated when stock restoration fails")
-	}
-}
-
-func TestCancelOrder_UpdateStatusError(t *testing.T) {
-	expectedErr := errors.New("failed to update order status")
-
-	productRepository := &cancelTestProductRepository{}
-
-	orderRepository := &cancelTestOrderRepository{
-		order: Order{
-			ID:     100,
-			UserID: 10,
-			Status: "pending",
-		},
-		items: []OrderItem{
-			{
-				ID:        1,
-				OrderID:   100,
-				ProductID: 1,
-				Quantity:  2,
-				UnitPrice: 150000,
-			},
-		},
-		updateErr: expectedErr,
-	}
-
-	service := NewService(
-		&fakeTransactionManager{},
-		productRepository,
-		orderRepository,
-		payment.NewFakeService(payment.ResultSuccess),
-	)
-
-	err := service.CancelOrder(
-		context.Background(),
-		10,
-		100,
-	)
-
-	if !errors.Is(err, expectedErr) {
-		t.Fatalf(
-			"expected update status error, got %v",
-			err,
-		)
-	}
-
-	if productRepository.increasedProducts[1] != 2 {
-		t.Fatalf(
-			"expected product stock increase by 2, got %d",
-			productRepository.increasedProducts[1],
-		)
-	}
-}
-
-type mockPaymentService struct {
-	result payment.Result
-	err    error
-
-	orderID  int64
-	amount   int64
-	currency string
-	called   bool
-}
-
-func (m *mockPaymentService) Pay(
+func (f *fakeOrderRepository) GetByID(
 	ctx context.Context,
-	orderID int64,
-	amount int64,
-	currency string,
-) (payment.Result, error) {
-	m.called = true
-	m.orderID = orderID
-	m.amount = amount
-	m.currency = currency
+	tx database.Tx,
+	id int64,
+) (Order, error) {
+	if f.getByIDErr != nil {
+		return Order{}, f.getByIDErr
+	}
 
-	return m.result, m.err
+	return f.order, nil
 }
 
-func TestPayOrder_Success(t *testing.T) {
-	paymentService := &mockPaymentService{
-		result: payment.ResultSuccess,
+func (f *fakeOrderRepository) List(
+	ctx context.Context,
+	tx database.Tx,
+) ([]Order, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
 	}
 
-	orderRepository := &cancelTestOrderRepository{
-		order: Order{
-			ID:          100,
-			UserID:      10,
-			Status:      "pending",
-			TotalAmount: 300000,
-			Currency:    "EUR",
-		},
-	}
-
-	service := NewService(
-		&fakeTransactionManager{},
-		&cancelTestProductRepository{},
-		orderRepository,
-		paymentService,
-	)
-
-	err := service.PayOrder(
-		context.Background(),
-		10,
-		100,
-	)
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !paymentService.called {
-		t.Fatal("payment service was not called")
-	}
-
-	if paymentService.orderID != 100 {
-		t.Fatalf("expected order ID 100, got %d", paymentService.orderID)
-	}
-
-	if paymentService.amount != 300000 {
-		t.Fatalf(
-			"expected amount 300000, got %d",
-			paymentService.amount,
-		)
-	}
-
-	if paymentService.currency != "EUR" {
-		t.Fatalf(
-			"expected currency EUR, got %s",
-			paymentService.currency,
-		)
-	}
-
-	if orderRepository.updatedOrderID != 100 {
-		t.Fatalf(
-			"expected updated order ID 100, got %d",
-			orderRepository.updatedOrderID,
-		)
-	}
-
-	if orderRepository.updatedStatus != "paid" {
-		t.Fatalf(
-			"expected status paid, got %s",
-			orderRepository.updatedStatus,
-		)
-	}
+	return f.orders, nil
 }
 
-func TestPayOrder_PaymentFailed(t *testing.T) {
-	paymentService := &mockPaymentService{
-		result: payment.ResultFailed,
-	}
-
-	orderRepository := &cancelTestOrderRepository{
-		order: Order{
-			ID:          100,
-			UserID:      10,
-			Status:      "pending",
-			TotalAmount: 300000,
-			Currency:    "EUR",
-		},
-	}
-
-	service := NewService(
-		&fakeTransactionManager{},
-		&cancelTestProductRepository{},
-		orderRepository,
-		paymentService,
-	)
-
-	err := service.PayOrder(
-		context.Background(),
-		10,
-		100,
-	)
-
-	if !errors.Is(err, ErrPaymentFailed) {
-		t.Fatalf(
-			"expected ErrPaymentFailed, got %v",
-			err,
-		)
-	}
-
-	if orderRepository.updatedOrderID != 0 {
-		t.Fatal("order status must not be updated")
-	}
-}
-
-func TestPayOrder_PaymentTimeout(t *testing.T) {
-	paymentService := &mockPaymentService{
-		result: payment.ResultTimeout,
-	}
-
-	orderRepository := &cancelTestOrderRepository{
-		order: Order{
-			ID:          100,
-			UserID:      10,
-			Status:      "pending",
-			TotalAmount: 300000,
-			Currency:    "EUR",
-		},
-	}
-
-	service := NewService(
-		&fakeTransactionManager{},
-		&cancelTestProductRepository{},
-		orderRepository,
-		paymentService,
-	)
-
-	err := service.PayOrder(
-		context.Background(),
-		10,
-		100,
-	)
-
-	if !errors.Is(err, ErrPaymentTimeout) {
-		t.Fatalf(
-			"expected ErrPaymentTimeout, got %v",
-			err,
-		)
-	}
-
-	if orderRepository.updatedOrderID != 0 {
-		t.Fatal("order status must not be updated")
-	}
-}
-
-func TestPayOrder_InvalidState(t *testing.T) {
-	paymentService := &mockPaymentService{
-		result: payment.ResultSuccess,
-	}
-
-	orderRepository := &cancelTestOrderRepository{
-		order: Order{
-			ID:     100,
-			UserID: 10,
-			Status: "cancelled",
-		},
-	}
-
-	service := NewService(
-		&fakeTransactionManager{},
-		&cancelTestProductRepository{},
-		orderRepository,
-		paymentService,
-	)
-
-	err := service.PayOrder(
-		context.Background(),
-		10,
-		100,
-	)
-
-	if !errors.Is(err, ErrInvalidOrderState) {
-		t.Fatalf(
-			"expected ErrInvalidOrderState, got %v",
-			err,
-		)
-	}
-
-	if paymentService.called {
-		t.Fatal("payment service must not be called")
-	}
-}
-
-func TestPayOrder_InvalidOrderID(t *testing.T) {
-	service := NewService(
-		&fakeTransactionManager{},
-		&cancelTestProductRepository{},
-		&cancelTestOrderRepository{},
-		&mockPaymentService{
-			result: payment.ResultSuccess,
-		},
-	)
-
-	err := service.PayOrder(
-		context.Background(),
-		10,
-		0,
-	)
-
-	if !errors.Is(err, ErrInvalidOrder) {
-		t.Fatalf(
-			"expected ErrInvalidOrder, got %v",
-			err,
-		)
-	}
-}
-
-func TestPayOrder_PaymentError(t *testing.T) {
-	expectedErr := errors.New("payment provider unavailable")
-
-	paymentService := &mockPaymentService{
-		err: expectedErr,
-	}
-
-	orderRepository := &cancelTestOrderRepository{
-		order: Order{
-			ID:          100,
-			UserID:      10,
-			Status:      "pending",
-			TotalAmount: 300000,
-			Currency:    "EUR",
-		},
-	}
-
-	service := NewService(
-		&fakeTransactionManager{},
-		&cancelTestProductRepository{},
-		orderRepository,
-		paymentService,
-	)
-
-	err := service.PayOrder(
-		context.Background(),
-		10,
-		100,
-	)
-
-	if !errors.Is(err, expectedErr) {
-		t.Fatalf(
-			"expected payment error, got %v",
-			err,
-		)
-	}
-
-	if orderRepository.updatedOrderID != 0 {
-		t.Fatal("order status must not be updated")
-	}
-}
-
-type payTestPaymentService struct {
+type fakePaymentService struct {
 	result payment.Result
 	err    error
 
@@ -1231,7 +253,7 @@ type payTestPaymentService struct {
 	currency string
 }
 
-func (f *payTestPaymentService) Pay(
+func (f *fakePaymentService) Pay(
 	ctx context.Context,
 	orderID int64,
 	amount int64,
@@ -1241,171 +263,1048 @@ func (f *payTestPaymentService) Pay(
 	f.amount = amount
 	f.currency = currency
 
-	if f.err != nil {
-		return "", f.err
-	}
-
-	return f.result, nil
+	return f.result, f.err
 }
 
-func TestPayOrder_NegativeOrderID(t *testing.T) {
-	service := NewService(
-		&fakeTransactionManager{},
-		&cancelTestProductRepository{},
-		&cancelTestOrderRepository{},
-		&payTestPaymentService{
-			result: payment.ResultSuccess,
+func newOrderService(
+	transactions TransactionManager,
+	products ProductRepository,
+	orders Repository,
+	paymentService payment.Service,
+) *Service {
+	return NewService(
+		transactions,
+		products,
+		orders,
+		paymentService,
+	)
+}
+
+func TestService_CreateOrder_InvalidUser(t *testing.T) {
+	t.Parallel()
+
+	service := newOrderService(
+		&fakeOrderTransactionManager{},
+		&fakeOrderProductRepository{},
+		&fakeOrderRepository{},
+		&fakePaymentService{},
+	)
+
+	_, err := service.CreateOrder(
+		context.Background(),
+		0,
+		CreateOrderRequest{
+			Items: []CreateOrderItem{
+				{
+					ProductID: 1,
+					Quantity:  1,
+				},
+			},
 		},
 	)
 
-	err := service.PayOrder(
+	if !errors.Is(err, ErrInvalidOrder) {
+		t.Fatalf("error = %v, want ErrInvalidOrder", err)
+	}
+}
+
+func TestService_CreateOrder_EmptyItems(t *testing.T) {
+	t.Parallel()
+
+	service := newOrderService(
+		&fakeOrderTransactionManager{},
+		&fakeOrderProductRepository{},
+		&fakeOrderRepository{},
+		&fakePaymentService{},
+	)
+
+	_, err := service.CreateOrder(
 		context.Background(),
+		1,
+		CreateOrderRequest{},
+	)
+
+	if !errors.Is(err, ErrInvalidOrder) {
+		t.Fatalf("error = %v, want ErrInvalidOrder", err)
+	}
+}
+
+func TestService_CreateOrder_InvalidItem(t *testing.T) {
+	t.Parallel()
+
+	tests := []CreateOrderItem{
+		{
+			ProductID: 0,
+			Quantity:  1,
+		},
+		{
+			ProductID: 1,
+			Quantity:  0,
+		},
+		{
+			ProductID: -1,
+			Quantity:  1,
+		},
+		{
+			ProductID: 1,
+			Quantity:  -1,
+		},
+	}
+
+	for _, item := range tests {
+		item := item
+
+		t.Run(
+			"invalid",
+			func(t *testing.T) {
+				t.Parallel()
+
+				service := newOrderService(
+					&fakeOrderTransactionManager{},
+					&fakeOrderProductRepository{},
+					&fakeOrderRepository{},
+					&fakePaymentService{},
+				)
+
+				_, err := service.CreateOrder(
+					context.Background(),
+					1,
+					CreateOrderRequest{
+						Items: []CreateOrderItem{item},
+					},
+				)
+
+				if !errors.Is(err, ErrInvalidOrder) {
+					t.Fatalf(
+						"error = %v, want ErrInvalidOrder",
+						err,
+					)
+				}
+			},
+		)
+	}
+}
+
+func TestService_CreateOrder_Success(t *testing.T) {
+	t.Parallel()
+
+	products := &fakeOrderProductRepository{
+		products: map[int64]product.Product{
+			1: {
+				ID:       1,
+				Name:     "Phone",
+				Price:    100,
+				Currency: "USD",
+				Stock:    10,
+			},
+			2: {
+				ID:       2,
+				Name:     "Case",
+				Price:    50,
+				Currency: "USD",
+				Stock:    20,
+			},
+		},
+	}
+
+	orders := &fakeOrderRepository{}
+
+	service := newOrderService(
+		&fakeOrderTransactionManager{},
+		products,
+		orders,
+		&fakePaymentService{},
+	)
+
+	got, err := service.CreateOrder(
+		context.Background(),
+		7,
+		CreateOrderRequest{
+			Items: []CreateOrderItem{
+				{
+					ProductID: 2,
+					Quantity:  2,
+				},
+				{
+					ProductID: 1,
+					Quantity:  3,
+				},
+			},
+		},
+	)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got.ID != 100 {
+		t.Fatalf("ID = %d, want 100", got.ID)
+	}
+
+	if got.UserID != 7 {
+		t.Fatalf("UserID = %d, want 7", got.UserID)
+	}
+
+	if got.Status != string(OrderStatusPending) {
+		t.Fatalf(
+			"Status = %q, want %q",
+			got.Status,
+			OrderStatusPending,
+		)
+	}
+
+	// 3 * 100 + 2 * 50
+	if got.TotalAmount != 400 {
+		t.Fatalf(
+			"TotalAmount = %d, want 400",
+			got.TotalAmount,
+		)
+	}
+
+	if got.Currency != "USD" {
+		t.Fatalf(
+			"Currency = %q, want USD",
+			got.Currency,
+		)
+	}
+
+	if len(orders.createdItems) != 2 {
+		t.Fatalf(
+			"created items = %d, want 2",
+			len(orders.createdItems),
+		)
+	}
+
+	if len(products.decreased) != 2 {
+		t.Fatalf(
+			"decreased calls = %d, want 2",
+			len(products.decreased),
+		)
+	}
+}
+
+func TestService_CreateOrder_MergesDuplicateProducts(t *testing.T) {
+	t.Parallel()
+
+	products := &fakeOrderProductRepository{
+		products: map[int64]product.Product{
+			1: {
+				ID:       1,
+				Price:    100,
+				Currency: "USD",
+				Stock:    10,
+			},
+		},
+	}
+
+	orders := &fakeOrderRepository{}
+
+	service := newOrderService(
+		&fakeOrderTransactionManager{},
+		products,
+		orders,
+		&fakePaymentService{},
+	)
+
+	_, err := service.CreateOrder(
+		context.Background(),
+		1,
+		CreateOrderRequest{
+			Items: []CreateOrderItem{
+				{ProductID: 1, Quantity: 2},
+				{ProductID: 1, Quantity: 3},
+			},
+		},
+	)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(orders.createdItems) != 1 {
+		t.Fatalf(
+			"created items = %d, want 1",
+			len(orders.createdItems),
+		)
+	}
+
+	if orders.createdItems[0].Quantity != 5 {
+		t.Fatalf(
+			"quantity = %d, want 5",
+			orders.createdItems[0].Quantity,
+		)
+	}
+}
+
+func TestService_CreateOrder_InsufficientStock(t *testing.T) {
+	t.Parallel()
+
+	products := &fakeOrderProductRepository{
+		products: map[int64]product.Product{
+			1: {
+				ID:       1,
+				Price:    100,
+				Currency: "USD",
+				Stock:    2,
+			},
+		},
+	}
+
+	service := newOrderService(
+		&fakeOrderTransactionManager{},
+		products,
+		&fakeOrderRepository{},
+		&fakePaymentService{},
+	)
+
+	_, err := service.CreateOrder(
+		context.Background(),
+		1,
+		CreateOrderRequest{
+			Items: []CreateOrderItem{
+				{
+					ProductID: 1,
+					Quantity:  3,
+				},
+			},
+		},
+	)
+
+	if !errors.Is(err, ErrInsufficientStock) {
+		t.Fatalf(
+			"error = %v, want ErrInsufficientStock",
+			err,
+		)
+	}
+}
+
+func TestService_CreateOrder_ProductNotFound(t *testing.T) {
+	t.Parallel()
+
+	products := &fakeOrderProductRepository{
+		products: map[int64]product.Product{},
+	}
+
+	service := newOrderService(
+		&fakeOrderTransactionManager{},
+		products,
+		&fakeOrderRepository{},
+		&fakePaymentService{},
+	)
+
+	_, err := service.CreateOrder(
+		context.Background(),
+		1,
+		CreateOrderRequest{
+			Items: []CreateOrderItem{
+				{
+					ProductID: 999,
+					Quantity:  1,
+				},
+			},
+		},
+	)
+
+	if !errors.Is(err, ErrProductNotFound) {
+		t.Fatalf(
+			"error = %v, want ErrProductNotFound",
+			err,
+		)
+	}
+}
+
+func TestService_CreateOrder_DifferentCurrencies(t *testing.T) {
+	t.Parallel()
+
+	products := &fakeOrderProductRepository{
+		products: map[int64]product.Product{
+			1: {
+				ID:       1,
+				Price:    100,
+				Currency: "USD",
+				Stock:    10,
+			},
+			2: {
+				ID:       2,
+				Price:    100,
+				Currency: "EUR",
+				Stock:    10,
+			},
+		},
+	}
+
+	service := newOrderService(
+		&fakeOrderTransactionManager{},
+		products,
+		&fakeOrderRepository{},
+		&fakePaymentService{},
+	)
+
+	_, err := service.CreateOrder(
+		context.Background(),
+		1,
+		CreateOrderRequest{
+			Items: []CreateOrderItem{
+				{ProductID: 1, Quantity: 1},
+				{ProductID: 2, Quantity: 1},
+			},
+		},
+	)
+
+	if !errors.Is(err, ErrDifferentCurrencies) {
+		t.Fatalf(
+			"error = %v, want ErrDifferentCurrencies",
+			err,
+		)
+	}
+}
+
+func TestService_CancelOrder_Success(t *testing.T) {
+	t.Parallel()
+
+	products := &fakeOrderProductRepository{
+		products: map[int64]product.Product{
+			1: {ID: 1},
+			2: {ID: 2},
+		},
+	}
+
+	orders := &fakeOrderRepository{
+		order: Order{
+			ID:     10,
+			UserID: 42,
+			Status: string(OrderStatusPending),
+		},
+		items: []OrderItem{
+			{
+				OrderID:   10,
+				ProductID: 1,
+				Quantity:  2,
+			},
+			{
+				OrderID:   10,
+				ProductID: 2,
+				Quantity:  3,
+			},
+		},
+	}
+
+	service := newOrderService(
+		&fakeOrderTransactionManager{},
+		products,
+		orders,
+		&fakePaymentService{},
+	)
+
+	err := service.CancelOrder(
+		context.Background(),
+		42,
 		10,
-		-1,
+	)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(products.increased) != 2 {
+		t.Fatalf(
+			"increase calls = %d, want 2",
+			len(products.increased),
+		)
+	}
+
+	if orders.updatedOrderID != 10 {
+		t.Fatalf(
+			"updated order ID = %d, want 10",
+			orders.updatedOrderID,
+		)
+	}
+
+	if orders.updatedStatus != string(OrderStatusCancelled) {
+		t.Fatalf(
+			"status = %q, want cancelled",
+			orders.updatedStatus,
+		)
+	}
+}
+
+func TestService_CancelOrder_InvalidArguments(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		userID  int64
+		orderID int64
+	}{
+		{
+			name:    "invalid user",
+			userID:  0,
+			orderID: 1,
+		},
+		{
+			name:    "invalid order",
+			userID:  1,
+			orderID: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			service := newOrderService(
+				&fakeOrderTransactionManager{},
+				&fakeOrderProductRepository{},
+				&fakeOrderRepository{},
+				&fakePaymentService{},
+			)
+
+			err := service.CancelOrder(
+				context.Background(),
+				tt.userID,
+				tt.orderID,
+			)
+
+			if !errors.Is(err, ErrInvalidOrder) {
+				t.Fatalf(
+					"error = %v, want ErrInvalidOrder",
+					err,
+				)
+			}
+		})
+	}
+}
+
+func TestService_CancelOrder_Forbidden(t *testing.T) {
+	t.Parallel()
+
+	orders := &fakeOrderRepository{
+		order: Order{
+			ID:     10,
+			UserID: 100,
+			Status: string(OrderStatusPending),
+		},
+	}
+
+	service := newOrderService(
+		&fakeOrderTransactionManager{},
+		&fakeOrderProductRepository{},
+		orders,
+		&fakePaymentService{},
+	)
+
+	err := service.CancelOrder(
+		context.Background(),
+		200,
+		10,
+	)
+
+	if !errors.Is(err, ErrOrderForbidden) {
+		t.Fatalf(
+			"error = %v, want ErrOrderForbidden",
+			err,
+		)
+	}
+}
+
+func TestService_CancelOrder_InvalidState(t *testing.T) {
+	t.Parallel()
+
+	orders := &fakeOrderRepository{
+		order: Order{
+			ID:     10,
+			UserID: 100,
+			Status: string(OrderStatusPaid),
+		},
+	}
+
+	service := newOrderService(
+		&fakeOrderTransactionManager{},
+		&fakeOrderProductRepository{},
+		orders,
+		&fakePaymentService{},
+	)
+
+	err := service.CancelOrder(
+		context.Background(),
+		100,
+		10,
+	)
+
+	if !errors.Is(err, ErrInvalidOrderState) {
+		t.Fatalf(
+			"error = %v, want ErrInvalidOrderState",
+			err,
+		)
+	}
+}
+
+func TestService_GetOrder_Success(t *testing.T) {
+	t.Parallel()
+
+	wantOrder := Order{
+		ID:       10,
+		UserID:   42,
+		Status:   string(OrderStatusPending),
+		Currency: "USD",
+	}
+
+	wantItems := []OrderItem{
+		{
+			ID:        1,
+			OrderID:   10,
+			ProductID: 5,
+			Quantity:  2,
+			UnitPrice: 100,
+		},
+	}
+
+	orders := &fakeOrderRepository{
+		order: wantOrder,
+		items: wantItems,
+	}
+
+	service := newOrderService(
+		&fakeOrderTransactionManager{},
+		&fakeOrderProductRepository{},
+		orders,
+		&fakePaymentService{},
+	)
+
+	gotOrder, gotItems, err := service.GetOrder(
+		context.Background(),
+		42,
+		10,
+	)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if gotOrder != wantOrder {
+		t.Fatalf("order = %+v, want %+v", gotOrder, wantOrder)
+	}
+
+	if len(gotItems) != 1 {
+		t.Fatalf("items = %d, want 1", len(gotItems))
+	}
+}
+
+func TestService_GetOrder_Forbidden(t *testing.T) {
+	t.Parallel()
+
+	orders := &fakeOrderRepository{
+		order: Order{
+			ID:     10,
+			UserID: 42,
+		},
+	}
+
+	service := newOrderService(
+		&fakeOrderTransactionManager{},
+		&fakeOrderProductRepository{},
+		orders,
+		&fakePaymentService{},
+	)
+
+	_, _, err := service.GetOrder(
+		context.Background(),
+		99,
+		10,
+	)
+
+	if !errors.Is(err, ErrOrderForbidden) {
+		t.Fatalf(
+			"error = %v, want ErrOrderForbidden",
+			err,
+		)
+	}
+}
+
+func TestService_GetOrder_InvalidArguments(t *testing.T) {
+	t.Parallel()
+
+	service := newOrderService(
+		&fakeOrderTransactionManager{},
+		&fakeOrderProductRepository{},
+		&fakeOrderRepository{},
+		&fakePaymentService{},
+	)
+
+	_, _, err := service.GetOrder(
+		context.Background(),
+		0,
+		1,
 	)
 
 	if !errors.Is(err, ErrInvalidOrder) {
 		t.Fatalf(
-			"expected ErrInvalidOrder, got %v",
+			"error = %v, want ErrInvalidOrder",
 			err,
 		)
 	}
 }
 
-func TestPayOrder_OrderNotFound(t *testing.T) {
-	orderRepository := &cancelTestOrderRepository{
-		getOrderErr: ErrOrderNotFound,
+func TestService_ListOrders(t *testing.T) {
+	t.Parallel()
+
+	want := []Order{
+		{ID: 3},
+		{ID: 2},
+		{ID: 1},
 	}
 
-	service := NewService(
-		&fakeTransactionManager{},
-		&cancelTestProductRepository{},
-		orderRepository,
-		&payTestPaymentService{
-			result: payment.ResultSuccess,
-		},
+	orders := &fakeOrderRepository{
+		orders: want,
+	}
+
+	service := newOrderService(
+		&fakeOrderTransactionManager{},
+		&fakeOrderProductRepository{},
+		orders,
+		&fakePaymentService{},
 	)
 
-	err := service.PayOrder(
-		context.Background(),
-		10,
-		100,
-	)
+	got, err := service.ListOrders(context.Background())
 
-	if !errors.Is(err, ErrOrderNotFound) {
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(got) != len(want) {
 		t.Fatalf(
-			"expected ErrOrderNotFound, got %v",
-			err,
+			"len = %d, want %d",
+			len(got),
+			len(want),
 		)
 	}
 }
 
-func TestPayOrder_GetOrderError(t *testing.T) {
-	expectedErr := errors.New("database error")
+func TestService_UpdateOrderStatus(t *testing.T) {
+	t.Parallel()
 
-	orderRepository := &cancelTestOrderRepository{
-		getOrderErr: expectedErr,
-	}
-
-	service := NewService(
-		&fakeTransactionManager{},
-		&cancelTestProductRepository{},
-		orderRepository,
-		&payTestPaymentService{
-			result: payment.ResultSuccess,
-		},
-	)
-
-	err := service.PayOrder(
-		context.Background(),
-		10,
-		100,
-	)
-
-	if !errors.Is(err, expectedErr) {
-		t.Fatalf(
-			"expected database error, got %v",
-			err,
-		)
-	}
-}
-
-func TestPayOrder_InvalidOrderState(t *testing.T) {
-	orderRepository := &cancelTestOrderRepository{
+	orders := &fakeOrderRepository{
 		order: Order{
-			ID:          100,
-			UserID:      10,
-			Status:      "paid",
-			TotalAmount: 300000,
-			Currency:    "EUR",
+			ID:     10,
+			Status: string(OrderStatusPending),
 		},
 	}
 
-	paymentService := &payTestPaymentService{
+	service := newOrderService(
+		&fakeOrderTransactionManager{},
+		&fakeOrderProductRepository{},
+		orders,
+		&fakePaymentService{},
+	)
+
+	err := service.UpdateOrderStatus(
+		context.Background(),
+		10,
+		string(OrderStatusPaid),
+	)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if orders.updatedOrderID != 10 {
+		t.Fatalf(
+			"order ID = %d, want 10",
+			orders.updatedOrderID,
+		)
+	}
+
+	if orders.updatedStatus != string(OrderStatusPaid) {
+		t.Fatalf(
+			"status = %q, want paid",
+			orders.updatedStatus,
+		)
+	}
+}
+
+func TestService_UpdateOrderStatus_InvalidStatus(t *testing.T) {
+	t.Parallel()
+
+	service := newOrderService(
+		&fakeOrderTransactionManager{},
+		&fakeOrderProductRepository{},
+		&fakeOrderRepository{},
+		&fakePaymentService{},
+	)
+
+	err := service.UpdateOrderStatus(
+		context.Background(),
+		10,
+		"invalid",
+	)
+
+	if !errors.Is(err, ErrInvalidOrderState) {
+		t.Fatalf(
+			"error = %v, want ErrInvalidOrderState",
+			err,
+		)
+	}
+}
+
+func TestService_UpdateOrderStatus_InvalidTransition(t *testing.T) {
+	t.Parallel()
+
+	orders := &fakeOrderRepository{
+		order: Order{
+			ID:     10,
+			Status: string(OrderStatusPending),
+		},
+	}
+
+	service := newOrderService(
+		&fakeOrderTransactionManager{},
+		&fakeOrderProductRepository{},
+		orders,
+		&fakePaymentService{},
+	)
+
+	err := service.UpdateOrderStatus(
+		context.Background(),
+		10,
+		string(OrderStatusProcessing),
+	)
+
+	if !errors.Is(err, ErrInvalidOrderState) {
+		t.Fatalf(
+			"error = %v, want ErrInvalidOrderState",
+			err,
+		)
+	}
+}
+
+func TestService_PayOrder_Success(t *testing.T) {
+	t.Parallel()
+
+	orders := &fakeOrderRepository{
+		order: Order{
+			ID:          10,
+			UserID:      42,
+			Status:      string(OrderStatusPending),
+			TotalAmount: 1000,
+			Currency:    "USD",
+		},
+	}
+
+	paymentService := &fakePaymentService{
 		result: payment.ResultSuccess,
 	}
 
-	service := NewService(
-		&fakeTransactionManager{},
-		&cancelTestProductRepository{},
-		orderRepository,
+	service := newOrderService(
+		&fakeOrderTransactionManager{},
+		&fakeOrderProductRepository{},
+		orders,
 		paymentService,
 	)
 
 	err := service.PayOrder(
 		context.Background(),
+		42,
 		10,
-		100,
 	)
 
-	if !errors.Is(err, ErrInvalidOrderState) {
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if paymentService.orderID != 10 {
 		t.Fatalf(
-			"expected ErrInvalidOrderState, got %v",
-			err,
+			"payment order ID = %d, want 10",
+			paymentService.orderID,
 		)
 	}
 
-	if paymentService.orderID != 0 {
-		t.Fatal("payment must not be called for invalid order state")
+	if paymentService.amount != 1000 {
+		t.Fatalf(
+			"payment amount = %d, want 1000",
+			paymentService.amount,
+		)
 	}
 
-	if orderRepository.updatedOrderID != 0 {
-		t.Fatal("order status must not be updated")
+	if paymentService.currency != "USD" {
+		t.Fatalf(
+			"payment currency = %q, want USD",
+			paymentService.currency,
+		)
+	}
+
+	if orders.updatedStatus != string(OrderStatusPaid) {
+		t.Fatalf(
+			"status = %q, want paid",
+			orders.updatedStatus,
+		)
 	}
 }
 
-func TestPayOrder_UpdateStatusError(t *testing.T) {
-	expectedErr := errors.New("failed to update order status")
+func TestService_PayOrder_Results(t *testing.T) {
+	t.Parallel()
 
-	orderRepository := &cancelTestOrderRepository{
-		order: Order{
-			ID:          100,
-			UserID:      10,
-			Status:      "pending",
-			TotalAmount: 300000,
-			Currency:    "EUR",
+	tests := []struct {
+		name    string
+		result  payment.Result
+		wantErr error
+	}{
+		{
+			name:    "failed",
+			result:  payment.ResultFailed,
+			wantErr: ErrPaymentFailed,
 		},
-		updateErr: expectedErr,
+		{
+			name:    "timeout",
+			result:  payment.ResultTimeout,
+			wantErr: ErrPaymentTimeout,
+		},
+		{
+			name:    "unknown",
+			result:  payment.Result("unknown"),
+			wantErr: ErrPaymentFailed,
+		},
 	}
 
-	service := NewService(
-		&fakeTransactionManager{},
-		&cancelTestProductRepository{},
-		orderRepository,
-		&payTestPaymentService{
+	for _, tt := range tests {
+		tt := tt
+
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orders := &fakeOrderRepository{
+				order: Order{
+					ID:          10,
+					UserID:      42,
+					Status:      string(OrderStatusPending),
+					TotalAmount: 100,
+					Currency:    "USD",
+				},
+			}
+
+			service := newOrderService(
+				&fakeOrderTransactionManager{},
+				&fakeOrderProductRepository{},
+				orders,
+				&fakePaymentService{
+					result: tt.result,
+				},
+			)
+
+			err := service.PayOrder(
+				context.Background(),
+				42,
+				10,
+			)
+
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf(
+					"error = %v, want %v",
+					err,
+					tt.wantErr,
+				)
+			}
+		})
+	}
+}
+
+func TestService_PayOrder_PaymentError(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("payment service unavailable")
+
+	orders := &fakeOrderRepository{
+		order: Order{
+			ID:     10,
+			UserID: 42,
+			Status: string(OrderStatusPending),
+		},
+	}
+
+	service := newOrderService(
+		&fakeOrderTransactionManager{},
+		&fakeOrderProductRepository{},
+		orders,
+		&fakePaymentService{
+			err: wantErr,
+		},
+	)
+
+	err := service.PayOrder(
+		context.Background(),
+		42,
+		10,
+	)
+
+	if !errors.Is(err, wantErr) {
+		t.Fatalf(
+			"error = %v, want %v",
+			err,
+			wantErr,
+		)
+	}
+}
+
+func TestService_PayOrder_Forbidden(t *testing.T) {
+	t.Parallel()
+
+	orders := &fakeOrderRepository{
+		order: Order{
+			ID:     10,
+			UserID: 42,
+			Status: string(OrderStatusPending),
+		},
+	}
+
+	service := newOrderService(
+		&fakeOrderTransactionManager{},
+		&fakeOrderProductRepository{},
+		orders,
+		&fakePaymentService{
 			result: payment.ResultSuccess,
 		},
 	)
 
 	err := service.PayOrder(
 		context.Background(),
+		99,
 		10,
-		100,
 	)
 
-	if !errors.Is(err, expectedErr) {
+	if !errors.Is(err, ErrOrderForbidden) {
 		t.Fatalf(
-			"expected update status error, got %v",
+			"error = %v, want ErrOrderForbidden",
+			err,
+		)
+	}
+}
+
+func TestService_PayOrder_InvalidState(t *testing.T) {
+	t.Parallel()
+
+	orders := &fakeOrderRepository{
+		order: Order{
+			ID:     10,
+			UserID: 42,
+			Status: string(OrderStatusPaid),
+		},
+	}
+
+	service := newOrderService(
+		&fakeOrderTransactionManager{},
+		&fakeOrderProductRepository{},
+		orders,
+		&fakePaymentService{},
+	)
+
+	err := service.PayOrder(
+		context.Background(),
+		42,
+		10,
+	)
+
+	if !errors.Is(err, ErrInvalidOrderState) {
+		t.Fatalf(
+			"error = %v, want ErrInvalidOrderState",
 			err,
 		)
 	}
