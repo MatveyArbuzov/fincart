@@ -8,6 +8,24 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    services:
+      postgres:
+        image: postgres:16
+
+        env:
+          POSTGRES_USER: fincart
+          POSTGRES_PASSWORD: fincart
+          POSTGRES_DB: fincart
+
+        ports:
+          - 5432:5432
+
+        options: >-
+          --health-cmd="pg_isready -U fincart -d fincart"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -17,10 +35,22 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run migrations
+        env:
+          DATABASE_URL: postgresql://fincart:fincart@localhost:5432/fincart?sslmode=disable
+        run: go run ./cmd/migrate
+
       - name: Test
+        env:
+          DATABASE_URL: postgresql://fincart:fincart@localhost:5432/fincart?sslmode=disable
         run: go test ./...
 
       - name: Race detector
+        env:
+          DATABASE_URL: postgresql://fincart:fincart@localhost:5432/fincart?sslmode=disable
         run: go test -race ./...
 
       - name: Vet
