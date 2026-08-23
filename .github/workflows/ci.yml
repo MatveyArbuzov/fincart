@@ -76,7 +76,7 @@ jobs:
         run: npm install -g @redocly/cli
 
       - name: Lint OpenAPI
-        run: redocly lint docs/openapi.yaml -c docs/redocly.yaml
+        run: redocly lint docs/openapi.yaml --config docs/redocly.yaml
 
 
   openapi-contract:
