@@ -58,3 +58,43 @@ jobs:
 
       - name: Build
         run: go build ./...
+
+  openapi-lint:
+    name: OpenAPI lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Redocly CLI
+        run: npm install -g @redocly/cli
+
+      - name: Lint OpenAPI
+        run: redocly lint docs/openapi.yaml -c docs/redocly.yaml
+
+
+  openapi-contract:
+    name: OpenAPI HTTP contract
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Check OpenAPI against HTTP API
+        run: go test ./internal/httpserver -run TestOpenAPIContract -v

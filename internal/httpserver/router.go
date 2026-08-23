@@ -10,6 +10,96 @@ import (
 	"github.com/MatveyArbuzov/fincart/internal/user"
 )
 
+type Route struct {
+	Method string
+	Path   string
+}
+
+func Routes() []Route {
+	return []Route{
+		{
+			Method: http.MethodGet,
+			Path:   "/api/v1/products",
+		},
+		{
+			Method: http.MethodGet,
+			Path:   "/api/v1/products/{id}",
+		},
+		{
+			Method: http.MethodPost,
+			Path:   "/api/v1/auth/register",
+		},
+		{
+			Method: http.MethodPost,
+			Path:   "/api/v1/auth/login",
+		},
+		{
+			Method: http.MethodPost,
+			Path:   "/api/v1/auth/refresh",
+		},
+		{
+			Method: http.MethodPost,
+			Path:   "/api/v1/auth/logout",
+		},
+		{
+			Method: http.MethodPost,
+			Path:   "/api/v1/admin/products",
+		},
+		{
+			Method: http.MethodPatch,
+			Path:   "/api/v1/admin/products/{id}",
+		},
+		{
+			Method: http.MethodDelete,
+			Path:   "/api/v1/admin/products/{id}",
+		},
+		{
+			Method: http.MethodPost,
+			Path:   "/api/v1/orders",
+		},
+		{
+			Method: http.MethodGet,
+			Path:   "/api/v1/orders/{id}",
+		},
+		{
+			Method: http.MethodPost,
+			Path:   "/api/v1/orders/{id}/cancel",
+		},
+		{
+			Method: http.MethodPost,
+			Path:   "/api/v1/orders/{id}/pay",
+		},
+		{
+			Method: http.MethodGet,
+			Path:   "/api/v1/admin/orders",
+		},
+		{
+			Method: http.MethodPatch,
+			Path:   "/api/v1/admin/orders/{id}/status",
+		},
+		{
+			Method: http.MethodGet,
+			Path:   "/api/v1/cart",
+		},
+		{
+			Method: http.MethodPost,
+			Path:   "/api/v1/cart/items",
+		},
+		{
+			Method: http.MethodPatch,
+			Path:   "/api/v1/cart/items/{product_id}",
+		},
+		{
+			Method: http.MethodDelete,
+			Path:   "/api/v1/cart/items/{product_id}",
+		},
+		{
+			Method: http.MethodPost,
+			Path:   "/api/v1/cart/checkout",
+		},
+	}
+}
+
 func NewRouter(
 	productHandler *product.Handler,
 	orderHandler *order.Handler,
@@ -152,6 +242,8 @@ func NewRouter(
 			),
 		),
 	)
+
+	// Cart
 
 	mux.Handle(
 		"GET /api/v1/cart",

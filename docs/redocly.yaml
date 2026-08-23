@@ -1,0 +1,11 @@
+extends:
+  - recommended
+
+apis:
+  fincart:
+    root: ./openapi.yaml
+
+rules:
+  no-server-example.com: off
+  operation-4xx-response: off
+  info-license: off

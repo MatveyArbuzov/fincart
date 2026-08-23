@@ -132,9 +132,11 @@ func main() {
 		jwtManager,
 	)
 
+	handler := httpserver.CORS(router)
+
 	server := &http.Server{
 		Addr:              ":8080",
-		Handler:           router,
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
